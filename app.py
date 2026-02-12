@@ -7,6 +7,34 @@ from openpyxl.styles import Border, Side, Alignment
 
 st.set_page_config(page_title="BJ 하트 집계", layout="centered")
 
+# =========================
+# 🔐 비밀번호 게이트
+# =========================
+def check_password():
+    def password_entered():
+        if st.session_state.get("password", "") == st.secrets["APP_PASSWORD"]:
+            st.session_state["password_correct"] = True
+            st.session_state.pop("password", None)
+        else:
+            st.session_state["password_correct"] = False
+
+    if "password_correct" not in st.session_state:
+        st.text_input("비밀번호를 입력하세요", type="password", key="password", on_change=password_entered)
+        return False
+
+    if not st.session_state["password_correct"]:
+        st.text_input("비밀번호를 입력하세요", type="password", key="password", on_change=password_entered)
+        st.error("비밀번호가 틀렸습니다.")
+        return False
+
+    return True
+
+if not check_password():
+    st.stop()
+
+# =========================
+# 기존 화면
+# =========================
 st.title("BJ 하트 집계 (BJ 전달용)")
 st.caption("CSV / XLSX 파일 업로드 → BJ별 집계 엑셀 다운로드")
 
@@ -26,12 +54,10 @@ def make_excel(df, bj_name):
 
     total = int(pd.to_numeric(df["후원하트"], errors="coerce").fillna(0).sum())
 
-    # 1행
     ws["A1"] = ""
     ws["B1"] = bj_name
     ws["C1"] = total
 
-    # 2행 헤더
     ws["A2"] = "후원아이디"
     ws["B2"] = "닉네임"
     ws["C2"] = "후원하트"
@@ -49,9 +75,9 @@ def make_excel(df, bj_name):
         heart = int(r["후원하트"])
         if heart < 0:
             heart = 0
-        c = ws.cell(row=row, column=3, value=heart)
-        c.number_format = "#,##0"
 
+        cell = ws.cell(row=row, column=3, value=heart)
+        cell.number_format = "#,##0"
         row += 1
 
     ws.column_dimensions["A"].width = 26
