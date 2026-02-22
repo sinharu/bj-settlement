@@ -1,5 +1,7 @@
 import streamlit as st
 import pandas as pd
+import re
+from pathlib import Path
 from processor import process_dataframe
 from io import BytesIO
 from openpyxl import Workbook
@@ -19,11 +21,11 @@ def check_password():
             st.session_state["password_correct"] = False
 
     if "password_correct" not in st.session_state:
-        st.text_input("비밀번호를 입력하세요", type="password", key="password", on_change=password_entered)
+        st.text_input("비밀번호 입력", type="password", key="password", on_change=password_entered)
         return False
 
     if not st.session_state["password_correct"]:
-        st.text_input("비밀번호를 입력하세요", type="password", key="password", on_change=password_entered)
+        st.text_input("비밀번호 입력", type="password", key="password", on_change=password_entered)
         st.error("비밀번호가 틀렸습니다.")
         return False
 
@@ -37,18 +39,44 @@ if not check_password():
 # 📌 화면 시작
 # ==================================================
 st.title("BJ 하트 집계 (BJ 전달용)")
-st.caption("CSV / XLSX 업로드 → 웹 요약표 확인 → BJ별 엑셀 다운로드")
+st.caption("CSV / XLSX 업로드 → 요약 확인 → BJ별 다운로드")
 
 uploaded_files = st.file_uploader(
-    "CSV 또는 XLSX 파일을 업로드하세요",
+    "CSV 또는 XLSX 파일 업로드",
     type=["csv", "xlsx"],
     accept_multiple_files=True
 )
 
-# 업로드 안하면 여기서 멈춤 (에러 방지 핵심)
 if not uploaded_files:
-    st.info("파일을 업로드하면 집계 결과가 표시됩니다.")
+    st.info("파일을 업로드하면 결과가 표시됩니다.")
     st.stop()
+
+# ==================================================
+# 📅 날짜 prefix 추출
+# ==================================================
+def extract_prefix_from_filename(files):
+    for f in files:
+        name = Path(f.name).stem
+        match = re.match(r"^(\d{2}\.\d{2})", name)
+        if match:
+            return match.group(1)
+    return None
+
+
+def extract_earliest_date_prefix(df):
+    col_time = next((c for c in df.columns if "후원" in c and "시간" in c), None)
+    if not col_time:
+        return None
+
+    tmp = df.copy()
+    tmp[col_time] = pd.to_datetime(tmp[col_time], errors="coerce")
+    min_date = tmp[col_time].min()
+
+    if pd.isna(min_date):
+        return None
+
+    return min_date.strftime("%m.%d")
+
 
 # ==================================================
 # 📥 파일 읽기
@@ -70,13 +98,18 @@ if not dfs:
 
 merged = pd.concat(dfs, ignore_index=True)
 
+# 날짜 prefix 결정
+prefix = extract_prefix_from_filename(uploaded_files)
+if not prefix:
+    prefix = extract_earliest_date_prefix(merged)
+
 # ==================================================
-# 📊 웹 1차 요약표 (참여BJ별 하트 합산)
+# 📊 참여BJ 요약표
 # ==================================================
 try:
     tmp = merged.copy()
 
-    col_idnick = next((c for c in tmp.columns if "후원" in c and "아이디" in c and "닉네임" in c), None)
+    col_idnick = next((c for c in tmp.columns if "후원" in c and "아이디" in c), None)
     col_heart = next((c for c in tmp.columns if "후원" in c and "하트" in c), None)
     col_bj = next((c for c in tmp.columns if "참여" in c and "BJ" in c), None)
 
@@ -116,7 +149,6 @@ try:
         pivot = pivot[["참여BJ", "일반", "제휴", "총합"]]
         pivot = pivot.sort_values("총합", ascending=False)
 
-        # 숫자 포맷 보기 좋게
         for c in ["일반", "제휴", "총합"]:
             pivot[c] = pivot[c].apply(lambda x: f"{int(x):,}")
 
@@ -184,16 +216,16 @@ for bj, views in result.items():
 
     st.subheader(bj)
 
+    filename1 = f"{prefix}_{bj}_정산용.xlsx" if prefix else f"{bj}_정산용.xlsx"
+    filename2 = f"{prefix}_{bj}_BJ용.xlsx" if prefix else f"{bj}_BJ용.xlsx"
+
     st.download_button(
-        label=f"{bj}_정산용.xlsx 다운로드",
+        label=f"{filename1} 다운로드",
         data=make_excel(settlement_df, bj),
-        file_name=f"{bj}_정산용.xlsx",
+        file_name=filename1,
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
 
     st.download_button(
-        label=f"{bj}_BJ용.xlsx 다운로드",
-        data=make_excel(bj_df, bj),
-        file_name=f"{bj}_BJ용.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
+        label=f"{filename2} 다운로드",
+        data=make_excel(bj_df
