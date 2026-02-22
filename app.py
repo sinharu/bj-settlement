@@ -102,6 +102,45 @@ if uploaded_files:
 
     if dfs:
         merged = pd.concat(dfs, ignore_index=True)
+# 🔹 웹 요약표 생성
+summary_df = merged.copy()
+
+summary_df["후원하트"] = pd.to_numeric(summary_df["후원하트"], errors="coerce").fillna(0)
+summary_df.loc[summary_df["후원하트"] < 0, "후원하트"] = 0
+
+def classify_heart_web(id_val):
+    id_val = str(id_val)
+    if "@ka" in id_val:
+        return "일반"
+    if "@" in id_val:
+        return "제휴"
+    return "일반"
+
+# 아이디/닉네임 분리
+summary_df[["후원아이디", "닉네임"]] = summary_df["후원 아이디(닉네임)"].str.extract(r"([^()]+)\(([^()]+)\)", expand=True)
+
+summary_df["하트구분"] = summary_df["후원아이디"].apply(classify_heart_web)
+
+pivot = (
+    summary_df
+    .groupby(["참여BJ", "하트구분"])["후원하트"]
+    .sum()
+    .unstack(fill_value=0)
+    .reset_index()
+)
+
+if "일반" not in pivot.columns:
+    pivot["일반"] = 0
+if "제휴" not in pivot.columns:
+    pivot["제휴"] = 0
+
+pivot["총합"] = pivot["일반"] + pivot["제휴"]
+
+pivot = pivot.sort_values("총합", ascending=False)
+
+st.subheader("요약 참여BJ 총계")
+st.dataframe(pivot)
+
         result = process_dataframe(merged)
 
         if not result:
