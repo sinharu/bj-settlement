@@ -121,7 +121,7 @@ try:
             pivot[c] = pivot[c].apply(lambda x: f"{int(x):,}")
 
         st.subheader("요약_참여BJ_총계")
-        st.dataframe(pivot, use_container_width=True)
+        st.dataframe(pivot.reset_index(drop=True), hide_index=True, use_container_width=True)
 
 except Exception as e:
     st.warning(f"요약표 생성 중 오류: {e}")
