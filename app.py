@@ -110,9 +110,13 @@ if not dfs:
 
 merged = pd.concat(dfs, ignore_index=True)
 
-prefix = extract_prefix_from_filename(uploaded_files)
-if not prefix:
-    prefix = extract_earliest_date_prefix(merged)
+# 업로드 파일이 1개일 때만 날짜 사용
+if len(uploaded_files) == 1:
+    prefix = extract_prefix_from_filename(uploaded_files)
+    if not prefix:
+        prefix = extract_earliest_date_prefix(merged)
+else:
+    prefix = None
 
 
 # ==================================================
