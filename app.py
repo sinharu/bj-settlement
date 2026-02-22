@@ -109,11 +109,24 @@ if uploaded_files:
         else:
             st.success("집계 완료")
 
-            for bj, out_df in result.items():
-                st.download_button(
-                    label=f"{bj}.xlsx 다운로드",
-                    data=make_excel(out_df, bj),
-                    file_name=f"{bj}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
+for bj, views in result.items():
+
+    settlement_df = views["정산용"]
+    bj_df = views["BJ용"]
+
+    st.subheader(f"{bj}")
+
+    st.download_button(
+        label=f"{bj}_정산용.xlsx 다운로드",
+        data=make_excel(settlement_df, bj),
+        file_name=f"{bj}_정산용.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+
+    st.download_button(
+        label=f"{bj}_BJ용.xlsx 다운로드",
+        data=make_excel(bj_df, bj),
+        file_name=f"{bj}_BJ용.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
 

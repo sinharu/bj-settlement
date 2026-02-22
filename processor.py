@@ -1,126 +1,94 @@
 import pandas as pd
 
-def _read_csv_any(path: str) -> pd.DataFrame:
-    for enc in ("utf-8-sig", "utf-8", "cp949", "euc-kr"):
-        try:
-            return pd.read_csv(path, encoding=enc)
-        except Exception:
-            pass
-    return pd.read_csv(path, encoding="utf-8", errors="replace")
-
-def load_file(path: str) -> pd.DataFrame:
-    if path.lower().endswith(".csv"):
-        return _read_csv_any(path)
-    return pd.read_excel(path)
-
 def split_id_nickname(text):
-    """
-    'id(닉네임)' -> ('id', '닉네임')
-    괄호가 없으면 ('원문', '')
-    """
-    try:
-        s = "" if pd.isna(text) else str(text)
-        if "(" in s and ")" in s:
-            _id, _nick = s.split("(", 1)
-            return _id.strip(), _nick.rstrip(")").strip()
-        return s.strip(), ""
-    except Exception:
-        return str(text), ""
+    text = str(text)
+    if "(" in text and ")" in text:
+        id_part, nick_part = text.split("(", 1)
+        nick_part = nick_part.rstrip(")")
+    else:
+        id_part = text
+        nick_part = ""
+    return id_part.strip(), nick_part.strip()
 
-def heart_type(uid: str) -> int:
-    """
-    0 = 일반하트
-    1 = 제휴하트
-    규칙:
-    - '@' 있으면 제휴
-    - 단 '@ka' 포함 시 예외로 일반
-    """
-    uid = str(uid)
-    if "@ka" in uid:
-        return 0
-    if "@" in uid:
-        return 1
-    return 0
 
-def process_dataframe(df: pd.DataFrame) -> dict:
-    """
-    원본 구조 (고정)
-    A열: 일자/시간 (무시)
-    B열: 후원아이디(닉네임)
-    C열: 후원하트
-    D열: 참여BJ (이걸로 파일 분리)
+def classify_heart(id_val):
+    id_val = str(id_val)
+    if "@ka" in id_val:
+        return "일반"
+    if "@" in id_val:
+        return "제휴"
+    return "일반"
 
-    출력 구조
-    A열: 후원아이디
-    B열: 닉네임
-    C열: 후원하트 (닉네임 기준 합산)
 
-    정렬 규칙
-    1. 일반하트 먼저
-    2. 제휴하트 아래
-    3. 각 그룹 내에서 후원하트 내림차순
-    """
+def process_dataframe(df):
 
-    if df is None or df.empty:
-        return {}
-
-    if df.shape[1] < 4:
-        raise ValueError(
-            "컬럼 부족: A=시간(무시), B=후원아이디(닉), C=후원하트, D=참여BJ 필요"
-        )
-
+    # 필요한 컬럼만 사용
     df = df.copy()
+    df = df[["후원 아이디(닉네임)", "후원하트", "참여BJ"]]
 
-    # 컬럼 위치 기준
-    idnick_col = df.iloc[:, 1]   # B열
-    heart_col  = df.iloc[:, 2]   # C열
-    bj_col     = df.iloc[:, 3]   # D열
-
-    df["_BJ"] = bj_col.astype(str).str.strip()
-
-    # ID / 닉네임 분리
-    df[["_ID", "_NICK"]] = idnick_col.apply(
+    # 아이디 / 닉네임 분리
+    df[["후원아이디", "닉네임"]] = df["후원 아이디(닉네임)"].apply(
         lambda x: pd.Series(split_id_nickname(x))
     )
 
-    # 하트 숫자화 + 음수 제거
-    df["_HEART"] = pd.to_numeric(heart_col, errors="coerce").fillna(0)
-    df.loc[df["_HEART"] < 0, "_HEART"] = 0
+    # 하트 숫자 정리
+    df["후원하트"] = pd.to_numeric(df["후원하트"], errors="coerce").fillna(0)
+    df.loc[df["후원하트"] < 0, "후원하트"] = 0
+
+    # 하트 타입 구분
+    df["하트구분"] = df["후원아이디"].apply(classify_heart)
 
     result = {}
 
-    for bj in df["_BJ"].dropna().unique():
-        bj_df = df[df["_BJ"] == bj]
-        if bj_df.empty:
-            continue
+    for bj, bj_df in df.groupby("참여BJ"):
 
-        grouped = (
-            bj_df
-            .groupby(["_NICK"], as_index=False)
-            .agg(
-                후원하트=("_HEART", "sum"),
-                후원아이디=("_ID", "first")
-            )
+        # ==============================
+        # 1️⃣ 아이디 기준 합산
+        # ==============================
+
+        # 아이디 + 닉네임별 합계
+        nick_sum = (
+            bj_df.groupby(["후원아이디", "닉네임"])["후원하트"]
+            .sum()
+            .reset_index()
         )
 
-        # 일반 / 제휴 구분
-        grouped["_TYPE"] = grouped["후원아이디"].apply(heart_type)
-        # 0 = 일반, 1 = 제휴
+        # 각 아이디에서 가장 하트 많이 받은 닉네임 선택
+        idx = nick_sum.groupby("후원아이디")["후원하트"].idxmax()
+        representative = nick_sum.loc[idx]
 
-        # 정렬: 일반 → 제휴, 각 그룹 내 하트 내림차순
-        grouped = grouped.sort_values(
-            by=["_TYPE", "후원하트"],
-            ascending=[True, False]
+        # 아이디 기준 총합
+        total_sum = (
+            bj_df.groupby("후원아이디")["후원하트"]
+            .sum()
+            .reset_index()
         )
 
-        out = (
-            grouped
-            .rename(columns={"_NICK": "닉네임"})
-            [["후원아이디", "닉네임", "후원하트"]]
-            .reset_index(drop=True)
-        )
+        merged = pd.merge(total_sum, representative[["후원아이디", "닉네임"]],
+                          on="후원아이디", how="left")
 
-        result[bj] = out
+        # 하트 타입 다시 붙이기
+        merged["하트구분"] = merged["후원아이디"].apply(classify_heart)
+
+        # ==============================
+        # 2️⃣ 정산용 정렬 (일반 위 / 제휴 아래)
+        # ==============================
+
+        normal = merged[merged["하트구분"] == "일반"].sort_values("후원하트", ascending=False)
+        partner = merged[merged["하트구분"] == "제휴"].sort_values("후원하트", ascending=False)
+
+        settlement_view = pd.concat([normal, partner])
+
+        # ==============================
+        # 3️⃣ BJ용 정렬 (전체 통합 내림차순)
+        # ==============================
+
+        bj_view = merged.sort_values("후원하트", ascending=False)
+
+        result[bj] = {
+            "정산용": settlement_view.reset_index(drop=True),
+            "BJ용": bj_view.reset_index(drop=True)
+        }
 
     return result
 
