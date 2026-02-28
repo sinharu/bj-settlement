@@ -204,6 +204,11 @@ def make_excel(df: pd.DataFrame, bj_name: str) -> BytesIO:
 # ==================================================
 def make_total_excel(df: pd.DataFrame) -> BytesIO:
 
+    from openpyxl import Workbook
+    from openpyxl.styles import Border, Side
+    from io import BytesIO
+    import pandas as pd
+
     wb = Workbook()
     wb.remove(wb.active)
 
@@ -246,6 +251,30 @@ def make_total_excel(df: pd.DataFrame) -> BytesIO:
     tmp["구분"] = tmp["아이디"].apply(classify)
 
     # ==========================
+    # 테두리 설정
+    # ==========================
+    thin = Side(style="thin")
+    all_border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    def apply_border(ws):
+        for row in ws.iter_rows():
+            for cell in row:
+                if cell.value not in (None, ""):
+                    cell.border = all_border
+
+    # ==========================
+    # 자동 열 너비
+    # ==========================
+    def auto_width(ws):
+        for col in ws.columns:
+            max_len = 0
+            col_letter = col[0].column_letter
+            for cell in col:
+                if cell.value:
+                    max_len = max(max_len, len(str(cell.value)))
+            ws.column_dimensions[col_letter].width = min(max(max_len + 2, 12), 50)
+
+    # ==========================
     # 1️⃣ 일자별 집계
     # ==========================
     ws1 = wb.create_sheet("일자별집계")
@@ -260,27 +289,23 @@ def make_total_excel(df: pd.DataFrame) -> BytesIO:
 
     if "일반" not in s1.columns: s1["일반"] = 0
     if "제휴" not in s1.columns: s1["제휴"] = 0
-
     s1["총합"] = s1["일반"] + s1["제휴"]
 
     for _, r in s1.iterrows():
-        ws1.append([
-            r["날짜"],
-            r[col_bj],
-            int(r["일반"]),
-            int(r["제휴"]),
-            int(r["총합"])
-        ])
+        row = ws1.max_row + 1
+        ws1.cell(row=row, column=1, value=r["날짜"])
+        ws1.cell(row=row, column=2, value=r[col_bj])
 
-    # 넓게 설정
-    ws1.column_dimensions["A"].width = 14
-    ws1.column_dimensions["B"].width = 10
-    ws1.column_dimensions["C"].width = 12
-    ws1.column_dimensions["D"].width = 12
-    ws1.column_dimensions["E"].width = 12
+        c1 = ws1.cell(row=row, column=3, value=int(r["일반"]))
+        c2 = ws1.cell(row=row, column=4, value=int(r["제휴"]))
+        c3 = ws1.cell(row=row, column=5, value=int(r["총합"]))
 
-    ws1.sheet_view.zoomScale = 110
+        c1.number_format = "#,##0"
+        c2.number_format = "#,##0"
+        c3.number_format = "#,##0"
 
+    auto_width(ws1)
+    apply_border(ws1)
 
     # ==========================
     # 2️⃣ 전체 총합
@@ -297,24 +322,22 @@ def make_total_excel(df: pd.DataFrame) -> BytesIO:
 
     if "일반" not in s2.columns: s2["일반"] = 0
     if "제휴" not in s2.columns: s2["제휴"] = 0
-
     s2["총합"] = s2["일반"] + s2["제휴"]
 
     for _, r in s2.iterrows():
-        ws2.append([
-            r[col_bj],
-            int(r["일반"]),
-            int(r["제휴"]),
-            int(r["총합"])
-        ])
+        row = ws2.max_row + 1
+        ws2.cell(row=row, column=1, value=r[col_bj])
 
-    ws2.column_dimensions["A"].width = 10
-    ws2.column_dimensions["B"].width = 12
-    ws2.column_dimensions["C"].width = 12
-    ws2.column_dimensions["D"].width = 12
+        c1 = ws2.cell(row=row, column=2, value=int(r["일반"]))
+        c2 = ws2.cell(row=row, column=3, value=int(r["제휴"]))
+        c3 = ws2.cell(row=row, column=4, value=int(r["총합"]))
 
-    ws2.sheet_view.zoomScale = 110
+        c1.number_format = "#,##0"
+        c2.number_format = "#,##0"
+        c3.number_format = "#,##0"
 
+    auto_width(ws2)
+    apply_border(ws2)
 
     # ==========================
     # 3️⃣ BJ별 상세
@@ -330,10 +353,8 @@ def make_total_excel(df: pd.DataFrame) -> BytesIO:
 
         ws["A1"] = "총하트"
         ws["B1"] = int(총합)
-
         ws["D1"] = "일반하트"
         ws["E1"] = int(일반합)
-
         ws["G1"] = "제휴하트"
         ws["H1"] = int(제휴합)
 
@@ -345,24 +366,20 @@ def make_total_excel(df: pd.DataFrame) -> BytesIO:
         ws.append(["날짜", "시간", "아이디", "닉네임", "하트", "구분"])
 
         for _, r in sub.iterrows():
-            ws.append([
-                r["날짜"],
-                r["시간"],
-                r["아이디"],
-                r["닉네임"],
-                int(r[col_heart]),
-                r["구분"]
-            ])
+            row = ws.max_row + 1
 
-        # 매우 넓게
-        ws.column_dimensions["A"].width = 12
-        ws.column_dimensions["B"].width = 12
-        ws.column_dimensions["C"].width = 20
-        ws.column_dimensions["D"].width = 20
-        ws.column_dimensions["E"].width = 12
-        ws.column_dimensions["F"].width = 12
+            ws.cell(row=row, column=1, value=r["날짜"])
+            ws.cell(row=row, column=2, value=r["시간"])
+            ws.cell(row=row, column=3, value=r["아이디"])
+            ws.cell(row=row, column=4, value=r["닉네임"])
 
-        ws.sheet_view.zoomScale = 110
+            heart_cell = ws.cell(row=row, column=5, value=int(r[col_heart]))
+            heart_cell.number_format = "#,##0"
+
+            ws.cell(row=row, column=6, value=r["구분"])
+
+        auto_width(ws)
+        apply_border(ws)
 
     bio = BytesIO()
     wb.save(bio)
