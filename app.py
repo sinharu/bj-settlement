@@ -209,11 +209,11 @@ def make_total_excel(df: pd.DataFrame) -> BytesIO:
     tmp = df.copy()
 
     col_time = next((c for c in tmp.columns if "후원" in c and "시간" in c), None)
-    col_id = next((c for c in tmp.columns if "후원" in c and "아이디" in c), None)
+    col_idnick = next((c for c in tmp.columns if "후원" in c and "아이디" in c), None)
     col_heart = next((c for c in tmp.columns if "후원" in c and "하트" in c), None)
     col_bj = next((c for c in tmp.columns if "참여" in c and "BJ" in c), None)
 
-    if not all([col_time, col_id, col_heart, col_bj]):
+    if not all([col_time, col_idnick, col_heart, col_bj]):
         return None
 
     tmp[col_time] = pd.to_datetime(tmp[col_time], errors="coerce")
@@ -221,7 +221,20 @@ def make_total_excel(df: pd.DataFrame) -> BytesIO:
     tmp["시간"] = tmp[col_time].dt.time
     tmp[col_heart] = pd.to_numeric(tmp[col_heart], errors="coerce").fillna(0)
 
-    tmp["아이디"] = tmp[col_id].astype(str).str.replace(r"\(.*\)", "", regex=True)
+    # 아이디 / 닉네임 분리
+    def split_id_nickname(text):
+        text = str(text)
+        if "(" in text and ")" in text:
+            id_part, nick_part = text.split("(", 1)
+            nick_part = nick_part.rstrip(")")
+        else:
+            id_part = text
+            nick_part = ""
+        return id_part.strip(), nick_part.strip()
+
+    tmp[["아이디", "닉네임"]] = tmp[col_idnick].apply(
+        lambda x: pd.Series(split_id_nickname(x))
+    )
 
     def classify(x):
         if "@ka" in x:
@@ -232,43 +245,106 @@ def make_total_excel(df: pd.DataFrame) -> BytesIO:
 
     tmp["구분"] = tmp["아이디"].apply(classify)
 
-    # Sheet1
+    # ===============================
+    # 1️⃣ Sheet1: 일자별 집계
+    # ===============================
     ws1 = wb.create_sheet("일자별집계")
     ws1.append(["날짜", "BJ", "일반", "제휴", "총합"])
 
-    s1 = tmp.groupby(["날짜", col_bj, "구분"])[col_heart].sum().unstack(fill_value=0).reset_index()
-    if "일반" not in s1.columns: s1["일반"] = 0
-    if "제휴" not in s1.columns: s1["제휴"] = 0
+    s1 = (
+        tmp.groupby(["날짜", col_bj, "구분"])[col_heart]
+        .sum()
+        .unstack(fill_value=0)
+        .reset_index()
+    )
+
+    if "일반" not in s1.columns:
+        s1["일반"] = 0
+    if "제휴" not in s1.columns:
+        s1["제휴"] = 0
+
     s1["총합"] = s1["일반"] + s1["제휴"]
 
     for _, r in s1.iterrows():
-        ws1.append([r["날짜"], r[col_bj], int(r["일반"]), int(r["제휴"]), int(r["총합"])])
+        ws1.append([
+            r["날짜"],
+            r[col_bj],
+            int(r["일반"]),
+            int(r["제휴"]),
+            int(r["총합"])
+        ])
 
-    # Sheet2
+    # 열 너비 확장
+    ws1.column_dimensions["A"].width = 14
+    ws1.column_dimensions["B"].width = 20
+    ws1.column_dimensions["C"].width = 14
+    ws1.column_dimensions["D"].width = 14
+    ws1.column_dimensions["E"].width = 14
+
+    # ===============================
+    # 2️⃣ Sheet2: 전체 총합
+    # ===============================
     ws2 = wb.create_sheet("총합")
     ws2.append(["BJ", "일반", "제휴", "총합"])
 
-    s2 = tmp.groupby([col_bj, "구분"])[col_heart].sum().unstack(fill_value=0).reset_index()
-    if "일반" not in s2.columns: s2["일반"] = 0
-    if "제휴" not in s2.columns: s2["제휴"] = 0
+    s2 = (
+        tmp.groupby([col_bj, "구분"])[col_heart]
+        .sum()
+        .unstack(fill_value=0)
+        .reset_index()
+    )
+
+    if "일반" not in s2.columns:
+        s2["일반"] = 0
+    if "제휴" not in s2.columns:
+        s2["제휴"] = 0
+
     s2["총합"] = s2["일반"] + s2["제휴"]
 
     for _, r in s2.iterrows():
-        ws2.append([r[col_bj], int(r["일반"]), int(r["제휴"]), int(r["총합"])])
+        ws2.append([
+            r[col_bj],
+            int(r["일반"]),
+            int(r["제휴"]),
+            int(r["총합"])
+        ])
 
-    # Sheet3~
+    ws2.column_dimensions["A"].width = 20
+    ws2.column_dimensions["B"].width = 14
+    ws2.column_dimensions["C"].width = 14
+    ws2.column_dimensions["D"].width = 14
+
+    # ===============================
+    # 3️⃣ BJ별 상세 시트
+    # ===============================
     for bj in tmp[col_bj].unique():
         ws = wb.create_sheet(str(bj))
-        ws.append(["날짜", "시간", "아이디", "하트", "구분"])
+        ws.append(["날짜", "시간", "아이디", "닉네임", "하트", "구분"])
+
         sub = tmp[tmp[col_bj] == bj]
+
         for _, r in sub.iterrows():
-            ws.append([r["날짜"], r["시간"], r["아이디"], int(r[col_heart]), r["구분"]])
+            ws.append([
+                r["날짜"],
+                r["시간"],
+                r["아이디"],
+                r["닉네임"],
+                int(r[col_heart]),
+                r["구분"]
+            ])
+
+        # 열 너비 확장
+        ws.column_dimensions["A"].width = 14
+        ws.column_dimensions["B"].width = 12
+        ws.column_dimensions["C"].width = 26
+        ws.column_dimensions["D"].width = 20
+        ws.column_dimensions["E"].width = 14
+        ws.column_dimensions["F"].width = 12
 
     bio = BytesIO()
     wb.save(bio)
     bio.seek(0)
     return bio
-
 
 st.success("집계 완료")
 
