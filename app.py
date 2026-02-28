@@ -273,11 +273,11 @@ def make_total_excel(df: pd.DataFrame) -> BytesIO:
         ])
 
     # 넓게 설정
-    ws1.column_dimensions["A"].width = 28
-    ws1.column_dimensions["B"].width = 40
-    ws1.column_dimensions["C"].width = 22
-    ws1.column_dimensions["D"].width = 22
-    ws1.column_dimensions["E"].width = 22
+    ws1.column_dimensions["A"].width = 14
+    ws1.column_dimensions["B"].width = 12
+    ws1.column_dimensions["C"].width = 12
+    ws1.column_dimensions["D"].width = 12
+    ws1.column_dimensions["E"].width = 12
 
     ws1.sheet_view.zoomScale = 110
 
@@ -308,10 +308,10 @@ def make_total_excel(df: pd.DataFrame) -> BytesIO:
             int(r["총합"])
         ])
 
-    ws2.column_dimensions["A"].width = 40
-    ws2.column_dimensions["B"].width = 22
-    ws2.column_dimensions["C"].width = 22
-    ws2.column_dimensions["D"].width = 22
+    ws2.column_dimensions["A"].width = 14
+    ws2.column_dimensions["B"].width = 12
+    ws2.column_dimensions["C"].width = 12
+    ws2.column_dimensions["D"].width = 12
 
     ws2.sheet_view.zoomScale = 110
 
@@ -355,12 +355,12 @@ def make_total_excel(df: pd.DataFrame) -> BytesIO:
             ])
 
         # 매우 넓게
-        ws.column_dimensions["A"].width = 28
-        ws.column_dimensions["B"].width = 24
-        ws.column_dimensions["C"].width = 44
-        ws.column_dimensions["D"].width = 36
-        ws.column_dimensions["E"].width = 22
-        ws.column_dimensions["F"].width = 18
+        ws.column_dimensions["A"].width = 12
+        ws.column_dimensions["B"].width = 12
+        ws.column_dimensions["C"].width = 16
+        ws.column_dimensions["D"].width = 16
+        ws.column_dimensions["E"].width = 12
+        ws.column_dimensions["F"].width = 12
 
         ws.sheet_view.zoomScale = 110
 
