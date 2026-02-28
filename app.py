@@ -274,7 +274,7 @@ def make_total_excel(df: pd.DataFrame) -> BytesIO:
 
     # 넓게 설정
     ws1.column_dimensions["A"].width = 14
-    ws1.column_dimensions["B"].width = 12
+    ws1.column_dimensions["B"].width = 10
     ws1.column_dimensions["C"].width = 12
     ws1.column_dimensions["D"].width = 12
     ws1.column_dimensions["E"].width = 12
@@ -308,7 +308,7 @@ def make_total_excel(df: pd.DataFrame) -> BytesIO:
             int(r["총합"])
         ])
 
-    ws2.column_dimensions["A"].width = 14
+    ws2.column_dimensions["A"].width = 10
     ws2.column_dimensions["B"].width = 12
     ws2.column_dimensions["C"].width = 12
     ws2.column_dimensions["D"].width = 12
@@ -357,8 +357,8 @@ def make_total_excel(df: pd.DataFrame) -> BytesIO:
         # 매우 넓게
         ws.column_dimensions["A"].width = 12
         ws.column_dimensions["B"].width = 12
-        ws.column_dimensions["C"].width = 16
-        ws.column_dimensions["D"].width = 16
+        ws.column_dimensions["C"].width = 20
+        ws.column_dimensions["D"].width = 20
         ws.column_dimensions["E"].width = 12
         ws.column_dimensions["F"].width = 12
 
