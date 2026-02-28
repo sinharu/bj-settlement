@@ -317,30 +317,59 @@ def make_total_excel(df: pd.DataFrame) -> BytesIO:
     # ===============================
     # 3️⃣ BJ별 상세 시트
     # ===============================
-    for bj in tmp[col_bj].unique():
-        ws = wb.create_sheet(str(bj))
-        ws.append(["날짜", "시간", "아이디", "닉네임", "하트", "구분"])
+for bj in tmp[col_bj].unique():
 
-        sub = tmp[tmp[col_bj] == bj]
+    ws = wb.create_sheet(str(bj))
+    sub = tmp[tmp[col_bj] == bj]
 
-        for _, r in sub.iterrows():
-            ws.append([
-                r["날짜"],
-                r["시간"],
-                r["아이디"],
-                r["닉네임"],
-                int(r[col_heart]),
-                r["구분"]
-            ])
+    # 하트 합계 계산
+    일반합 = sub[sub["구분"] == "일반"][col_heart].sum()
+    제휴합 = sub[sub["구분"] == "제휴"][col_heart].sum()
+    총합 = 일반합 + 제휴합
 
-        # 열 너비 확장
-        ws.column_dimensions["A"].width = 14
-        ws.column_dimensions["B"].width = 12
-        ws.column_dimensions["C"].width = 26
-        ws.column_dimensions["D"].width = 20
-        ws.column_dimensions["E"].width = 14
-        ws.column_dimensions["F"].width = 12
+    # ===== 상단 가로 요약 =====
+    ws["A1"] = "총하트"
+    ws["B1"] = int(총합)
 
+    ws["D1"] = "일반하트"
+    ws["E1"] = int(일반합)
+
+    ws["G1"] = "제휴하트"
+    ws["H1"] = int(제휴합)
+
+    # 숫자 포맷
+    ws["B1"].number_format = "#,##0"
+    ws["E1"].number_format = "#,##0"
+    ws["H1"].number_format = "#,##0"
+
+    # 한 줄 비우고
+    ws.append([])
+    ws.append(["날짜", "시간", "아이디", "닉네임", "하트", "구분"])
+
+    for _, r in sub.iterrows():
+        ws.append([
+            r["날짜"],
+            r["시간"],
+            r["아이디"],
+            r["닉네임"],
+            int(r[col_heart]),
+            r["구분"]
+        ])
+
+    # 열 너비 확장
+    ws.column_dimensions["A"].width = 12
+    ws.column_dimensions["B"].width = 16
+    ws.column_dimensions["C"].width = 4
+    ws.column_dimensions["D"].width = 12
+    ws.column_dimensions["E"].width = 16
+    ws.column_dimensions["F"].width = 4
+    ws.column_dimensions["G"].width = 12
+    ws.column_dimensions["H"].width = 16
+
+    ws.column_dimensions["C"].width = 26
+    ws.column_dimensions["D"].width = 20
+    ws.column_dimensions["E"].width = 14
+    ws.column_dimensions["F"].width = 12
     bio = BytesIO()
     wb.save(bio)
     bio.seek(0)
