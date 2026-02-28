@@ -12,7 +12,6 @@ from processor import process_dataframe
 
 st.set_page_config(page_title="BJ 하트 집계", layout="centered")
 
-
 # ==================================================
 # 🔐 비밀번호 게이트
 # ==================================================
@@ -58,13 +57,9 @@ if not uploaded_files:
 
 
 # ==================================================
-# 📅 날짜 prefix (파일명 우선 → 없으면 데이터 최솟값)
+# 📅 날짜 prefix (파일 1개일 때만 적용)
 # ==================================================
 def extract_prefix_from_filename(files):
-    """
-    업로드 파일명 앞에 'MM.DD' 형태가 있으면 그 값을 prefix로 사용
-    예) '01.01 하꿍_내역.csv' -> '01.01'
-    """
     for f in files:
         stem = Path(f.name).stem
         m = re.match(r"^(\d{2}\.\d{2})", stem)
@@ -74,20 +69,14 @@ def extract_prefix_from_filename(files):
 
 
 def extract_earliest_date_prefix(df):
-    """
-    데이터 내 '후원시간' 계열 컬럼에서 가장 이른 날짜를 찾아 'MM.DD' 반환
-    """
     col_time = next((c for c in df.columns if "후원" in c and "시간" in c), None)
     if not col_time:
         return None
-
     tmp = df[[col_time]].copy()
     tmp[col_time] = pd.to_datetime(tmp[col_time], errors="coerce")
     min_dt = tmp[col_time].min()
-
     if pd.isna(min_dt):
         return None
-
     return min_dt.strftime("%m.%d")
 
 
@@ -95,6 +84,7 @@ def extract_earliest_date_prefix(df):
 # 📥 파일 읽기
 # ==================================================
 dfs = []
+
 for f in uploaded_files:
     try:
         if f.name.lower().endswith(".csv"):
@@ -110,7 +100,6 @@ if not dfs:
 
 merged = pd.concat(dfs, ignore_index=True)
 
-# 업로드 파일이 1개일 때만 날짜 사용
 if len(uploaded_files) == 1:
     prefix = extract_prefix_from_filename(uploaded_files)
     if not prefix:
@@ -120,7 +109,7 @@ else:
 
 
 # ==================================================
-# 📊 웹 1차 요약표 (참여BJ별 일반/제휴/총합)
+# 📊 웹 요약표
 # ==================================================
 def classify_heart_type(user_id: str) -> str:
     s = str(user_id)
@@ -134,20 +123,18 @@ def classify_heart_type(user_id: str) -> str:
 try:
     tmp = merged.copy()
 
-    # 너 원본 로직과 호환되게 "후원+아이디"만 찾도록 완화 (닉네임 포함 조건 제거)
-    col_idnick = next((c for c in tmp.columns if "후원" in c and "아이디" in c), None)
+    col_id = next((c for c in tmp.columns if "후원" in c and "아이디" in c), None)
     col_heart = next((c for c in tmp.columns if "후원" in c and "하트" in c), None)
     col_bj = next((c for c in tmp.columns if "참여" in c and "BJ" in c), None)
 
-    if not (col_idnick and col_heart and col_bj):
-        st.warning("필수 컬럼(후원아이디/후원하트/참여BJ)을 찾지 못했습니다.")
+    if not (col_id and col_heart and col_bj):
+        st.warning("필수 컬럼을 찾지 못했습니다.")
     else:
         tmp[col_heart] = pd.to_numeric(tmp[col_heart], errors="coerce").fillna(0)
         tmp.loc[tmp[col_heart] < 0, col_heart] = 0
 
-        # '(닉네임)' 같이 붙은 포맷이면 괄호 제거
         tmp["후원아이디"] = (
-            tmp[col_idnick]
+            tmp[col_id]
             .astype(str)
             .str.replace(r"\(.*\)", "", regex=True)
             .str.strip()
@@ -168,11 +155,9 @@ try:
             pivot["제휴"] = 0
 
         pivot["총합"] = pivot["일반"] + pivot["제휴"]
-
         pivot = pivot.rename(columns={col_bj: "참여BJ"})
         pivot = pivot[["참여BJ", "일반", "제휴", "총합"]].sort_values("총합", ascending=False)
 
-        # 화면 표시용 천단위 콤마 (데이터 자체는 문자열로 바뀜: 표시만 목적)
         for c in ["일반", "제휴", "총합"]:
             pivot[c] = pivot[c].apply(lambda x: f"{int(x):,}")
 
@@ -184,7 +169,7 @@ except Exception as e:
 
 
 # ==================================================
-# 📁 BJ별 엑셀 다운로드
+# 📁 BJ별 다운로드
 # ==================================================
 result = process_dataframe(merged)
 
@@ -194,44 +179,90 @@ if not result:
 
 
 def make_excel(df: pd.DataFrame, bj_name: str) -> BytesIO:
-    """
-    processor가 반환한 df(정산용/BJ용)를 받아 엑셀(BytesIO)로 만들어 반환
-    df에는 최소 '후원아이디', '닉네임', '후원하트' 컬럼이 있어야 한다.
-    """
     wb = Workbook()
     ws = wb.active
     ws.title = "정산표"
 
-    thin = Side(style="thin")
-    border = Border(left=thin, right=thin, top=thin, bottom=thin)
-
     total = int(pd.to_numeric(df["후원하트"], errors="coerce").fillna(0).sum())
 
-    ws["A1"] = ""
-    ws["B1"] = bj_name
-    ws["C1"] = total
+    ws.append(["", bj_name, total])
+    ws.append(["후원아이디", "닉네임", "후원하트"])
 
-    ws["A2"] = "후원아이디"
-    ws["B2"] = "닉네임"
-    ws["C2"] = "후원하트"
-
-    for col in ["A", "B", "C"]:
-        ws[f"{col}2"].border = border
-        ws[f"{col}2"].alignment = Alignment(horizontal="center")
-
-    row = 3
     for _, r in df.iterrows():
-        ws.cell(row=row, column=1, value=str(r["후원아이디"]))
-        ws.cell(row=row, column=2, value=str(r["닉네임"]))
         heart = pd.to_numeric(r["후원하트"], errors="coerce")
         heart = 0 if pd.isna(heart) else int(heart)
-        heart = max(heart, 0)
-        ws.cell(row=row, column=3, value=heart).number_format = "#,##0"
-        row += 1
+        ws.append([r["후원아이디"], r["닉네임"], heart])
 
-    ws.column_dimensions["A"].width = 26
-    ws.column_dimensions["B"].width = 26
-    ws.column_dimensions["C"].width = 12
+    bio = BytesIO()
+    wb.save(bio)
+    bio.seek(0)
+    return bio
+
+
+# ==================================================
+# 📦 총합산 파일 (여러 파일 업로드 시)
+# ==================================================
+def make_total_excel(df: pd.DataFrame) -> BytesIO:
+    wb = Workbook()
+    wb.remove(wb.active)
+
+    tmp = df.copy()
+
+    col_time = next((c for c in tmp.columns if "후원" in c and "시간" in c), None)
+    col_id = next((c for c in tmp.columns if "후원" in c and "아이디" in c), None)
+    col_heart = next((c for c in tmp.columns if "후원" in c and "하트" in c), None)
+    col_bj = next((c for c in tmp.columns if "참여" in c and "BJ" in c), None)
+
+    if not all([col_time, col_id, col_heart, col_bj]):
+        return None
+
+    tmp[col_time] = pd.to_datetime(tmp[col_time], errors="coerce")
+    tmp["날짜"] = tmp[col_time].dt.date
+    tmp["시간"] = tmp[col_time].dt.time
+    tmp[col_heart] = pd.to_numeric(tmp[col_heart], errors="coerce").fillna(0)
+
+    tmp["아이디"] = tmp[col_id].astype(str).str.replace(r"\(.*\)", "", regex=True)
+
+    def classify(x):
+        if "@ka" in x:
+            return "일반"
+        if "@" in x:
+            return "제휴"
+        return "일반"
+
+    tmp["구분"] = tmp["아이디"].apply(classify)
+
+    # Sheet1
+    ws1 = wb.create_sheet("일자별집계")
+    ws1.append(["날짜", "BJ", "일반", "제휴", "총합"])
+
+    s1 = tmp.groupby(["날짜", col_bj, "구분"])[col_heart].sum().unstack(fill_value=0).reset_index()
+    if "일반" not in s1.columns: s1["일반"] = 0
+    if "제휴" not in s1.columns: s1["제휴"] = 0
+    s1["총합"] = s1["일반"] + s1["제휴"]
+
+    for _, r in s1.iterrows():
+        ws1.append([r["날짜"], r[col_bj], int(r["일반"]), int(r["제휴"]), int(r["총합"])])
+
+    # Sheet2
+    ws2 = wb.create_sheet("총합")
+    ws2.append(["BJ", "일반", "제휴", "총합"])
+
+    s2 = tmp.groupby([col_bj, "구분"])[col_heart].sum().unstack(fill_value=0).reset_index()
+    if "일반" not in s2.columns: s2["일반"] = 0
+    if "제휴" not in s2.columns: s2["제휴"] = 0
+    s2["총합"] = s2["일반"] + s2["제휴"]
+
+    for _, r in s2.iterrows():
+        ws2.append([r[col_bj], int(r["일반"]), int(r["제휴"]), int(r["총합"])])
+
+    # Sheet3~
+    for bj in tmp[col_bj].unique():
+        ws = wb.create_sheet(str(bj))
+        ws.append(["날짜", "시간", "아이디", "하트", "구분"])
+        sub = tmp[tmp[col_bj] == bj]
+        for _, r in sub.iterrows():
+            ws.append([r["날짜"], r["시간"], r["아이디"], int(r[col_heart]), r["구분"]])
 
     bio = BytesIO()
     wb.save(bio)
@@ -240,6 +271,16 @@ def make_excel(df: pd.DataFrame, bj_name: str) -> BytesIO:
 
 
 st.success("집계 완료")
+
+if len(uploaded_files) > 1:
+    total_file = make_total_excel(merged)
+    if total_file:
+        st.download_button(
+            label="총합산.xlsx 다운로드",
+            data=total_file,
+            file_name="총합산.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
 
 for bj, views in result.items():
     settlement_df = views["정산용"]
