@@ -222,7 +222,6 @@ def make_total_excel(df: pd.DataFrame) -> BytesIO:
     tmp["시간"] = tmp[col_time].dt.time
     tmp[col_heart] = pd.to_numeric(tmp[col_heart], errors="coerce").fillna(0)
 
-    # 아이디/닉네임 분리
     def split_id_nickname(text):
         text = str(text)
         if "(" in text and ")" in text:
@@ -259,10 +258,8 @@ def make_total_excel(df: pd.DataFrame) -> BytesIO:
         .reset_index()
     )
 
-    if "일반" not in s1.columns:
-        s1["일반"] = 0
-    if "제휴" not in s1.columns:
-        s1["제휴"] = 0
+    if "일반" not in s1.columns: s1["일반"] = 0
+    if "제휴" not in s1.columns: s1["제휴"] = 0
 
     s1["총합"] = s1["일반"] + s1["제휴"]
 
@@ -274,6 +271,16 @@ def make_total_excel(df: pd.DataFrame) -> BytesIO:
             int(r["제휴"]),
             int(r["총합"])
         ])
+
+    # 넓게 설정
+    ws1.column_dimensions["A"].width = 28
+    ws1.column_dimensions["B"].width = 40
+    ws1.column_dimensions["C"].width = 22
+    ws1.column_dimensions["D"].width = 22
+    ws1.column_dimensions["E"].width = 22
+
+    ws1.sheet_view.zoomScale = 110
+
 
     # ==========================
     # 2️⃣ 전체 총합
@@ -288,10 +295,8 @@ def make_total_excel(df: pd.DataFrame) -> BytesIO:
         .reset_index()
     )
 
-    if "일반" not in s2.columns:
-        s2["일반"] = 0
-    if "제휴" not in s2.columns:
-        s2["제휴"] = 0
+    if "일반" not in s2.columns: s2["일반"] = 0
+    if "제휴" not in s2.columns: s2["제휴"] = 0
 
     s2["총합"] = s2["일반"] + s2["제휴"]
 
@@ -302,6 +307,14 @@ def make_total_excel(df: pd.DataFrame) -> BytesIO:
             int(r["제휴"]),
             int(r["총합"])
         ])
+
+    ws2.column_dimensions["A"].width = 40
+    ws2.column_dimensions["B"].width = 22
+    ws2.column_dimensions["C"].width = 22
+    ws2.column_dimensions["D"].width = 22
+
+    ws2.sheet_view.zoomScale = 110
+
 
     # ==========================
     # 3️⃣ BJ별 상세
@@ -315,7 +328,6 @@ def make_total_excel(df: pd.DataFrame) -> BytesIO:
         제휴합 = sub[sub["구분"] == "제휴"][col_heart].sum()
         총합 = 일반합 + 제휴합
 
-        # 가로 요약
         ws["A1"] = "총하트"
         ws["B1"] = int(총합)
 
@@ -342,11 +354,22 @@ def make_total_excel(df: pd.DataFrame) -> BytesIO:
                 r["구분"]
             ])
 
+        # 매우 넓게
+        ws.column_dimensions["A"].width = 28
+        ws.column_dimensions["B"].width = 24
+        ws.column_dimensions["C"].width = 44
+        ws.column_dimensions["D"].width = 36
+        ws.column_dimensions["E"].width = 22
+        ws.column_dimensions["F"].width = 18
+
+        ws.sheet_view.zoomScale = 110
+
     bio = BytesIO()
     wb.save(bio)
     bio.seek(0)
 
     return bio
+
 st.success("집계 완료")
 
 if len(uploaded_files) > 1:
