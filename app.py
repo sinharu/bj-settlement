@@ -203,6 +203,7 @@ def make_excel(df: pd.DataFrame, bj_name: str) -> BytesIO:
 # 📦 총합산 파일 (여러 파일 업로드 시)
 # ==================================================
 def make_total_excel(df: pd.DataFrame) -> BytesIO:
+
     wb = Workbook()
     wb.remove(wb.active)
 
@@ -221,7 +222,7 @@ def make_total_excel(df: pd.DataFrame) -> BytesIO:
     tmp["시간"] = tmp[col_time].dt.time
     tmp[col_heart] = pd.to_numeric(tmp[col_heart], errors="coerce").fillna(0)
 
-    # 아이디 / 닉네임 분리
+    # 아이디/닉네임 분리
     def split_id_nickname(text):
         text = str(text)
         if "(" in text and ")" in text:
@@ -245,9 +246,9 @@ def make_total_excel(df: pd.DataFrame) -> BytesIO:
 
     tmp["구분"] = tmp["아이디"].apply(classify)
 
-    # ===============================
-    # 1️⃣ Sheet1: 일자별 집계
-    # ===============================
+    # ==========================
+    # 1️⃣ 일자별 집계
+    # ==========================
     ws1 = wb.create_sheet("일자별집계")
     ws1.append(["날짜", "BJ", "일반", "제휴", "총합"])
 
@@ -274,16 +275,9 @@ def make_total_excel(df: pd.DataFrame) -> BytesIO:
             int(r["총합"])
         ])
 
-    # 열 너비 확장
-    ws1.column_dimensions["A"].width = 14
-    ws1.column_dimensions["B"].width = 20
-    ws1.column_dimensions["C"].width = 14
-    ws1.column_dimensions["D"].width = 14
-    ws1.column_dimensions["E"].width = 14
-
-    # ===============================
-    # 2️⃣ Sheet2: 전체 총합
-    # ===============================
+    # ==========================
+    # 2️⃣ 전체 총합
+    # ==========================
     ws2 = wb.create_sheet("총합")
     ws2.append(["BJ", "일반", "제휴", "총합"])
 
@@ -309,72 +303,50 @@ def make_total_excel(df: pd.DataFrame) -> BytesIO:
             int(r["총합"])
         ])
 
-    ws2.column_dimensions["A"].width = 20
-    ws2.column_dimensions["B"].width = 14
-    ws2.column_dimensions["C"].width = 14
-    ws2.column_dimensions["D"].width = 14
+    # ==========================
+    # 3️⃣ BJ별 상세
+    # ==========================
+    for bj in tmp[col_bj].unique():
 
-    # ===============================
-    # 3️⃣ BJ별 상세 시트
-    # ===============================
-for bj in tmp[col_bj].unique():
+        ws = wb.create_sheet(str(bj))
+        sub = tmp[tmp[col_bj] == bj]
 
-    ws = wb.create_sheet(str(bj))
-    sub = tmp[tmp[col_bj] == bj]
+        일반합 = sub[sub["구분"] == "일반"][col_heart].sum()
+        제휴합 = sub[sub["구분"] == "제휴"][col_heart].sum()
+        총합 = 일반합 + 제휴합
 
-    # 하트 합계 계산
-    일반합 = sub[sub["구분"] == "일반"][col_heart].sum()
-    제휴합 = sub[sub["구분"] == "제휴"][col_heart].sum()
-    총합 = 일반합 + 제휴합
+        # 가로 요약
+        ws["A1"] = "총하트"
+        ws["B1"] = int(총합)
 
-    # ===== 상단 가로 요약 =====
-    ws["A1"] = "총하트"
-    ws["B1"] = int(총합)
+        ws["D1"] = "일반하트"
+        ws["E1"] = int(일반합)
 
-    ws["D1"] = "일반하트"
-    ws["E1"] = int(일반합)
+        ws["G1"] = "제휴하트"
+        ws["H1"] = int(제휴합)
 
-    ws["G1"] = "제휴하트"
-    ws["H1"] = int(제휴합)
+        ws["B1"].number_format = "#,##0"
+        ws["E1"].number_format = "#,##0"
+        ws["H1"].number_format = "#,##0"
 
-    # 숫자 포맷
-    ws["B1"].number_format = "#,##0"
-    ws["E1"].number_format = "#,##0"
-    ws["H1"].number_format = "#,##0"
+        ws.append([])
+        ws.append(["날짜", "시간", "아이디", "닉네임", "하트", "구분"])
 
-    # 한 줄 비우고
-    ws.append([])
-    ws.append(["날짜", "시간", "아이디", "닉네임", "하트", "구분"])
+        for _, r in sub.iterrows():
+            ws.append([
+                r["날짜"],
+                r["시간"],
+                r["아이디"],
+                r["닉네임"],
+                int(r[col_heart]),
+                r["구분"]
+            ])
 
-    for _, r in sub.iterrows():
-        ws.append([
-            r["날짜"],
-            r["시간"],
-            r["아이디"],
-            r["닉네임"],
-            int(r[col_heart]),
-            r["구분"]
-        ])
-
-    # 열 너비 확장
-    ws.column_dimensions["A"].width = 12
-    ws.column_dimensions["B"].width = 16
-    ws.column_dimensions["C"].width = 4
-    ws.column_dimensions["D"].width = 12
-    ws.column_dimensions["E"].width = 16
-    ws.column_dimensions["F"].width = 4
-    ws.column_dimensions["G"].width = 12
-    ws.column_dimensions["H"].width = 16
-
-    ws.column_dimensions["C"].width = 26
-    ws.column_dimensions["D"].width = 20
-    ws.column_dimensions["E"].width = 14
-    ws.column_dimensions["F"].width = 12
     bio = BytesIO()
     wb.save(bio)
     bio.seek(0)
-    return bio
 
+    return bio
 st.success("집계 완료")
 
 if len(uploaded_files) > 1:
