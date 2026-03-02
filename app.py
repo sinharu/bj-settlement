@@ -33,7 +33,6 @@ def check_password():
 
     return True
 
-
 if not check_password():
     st.stop()
 
@@ -88,6 +87,35 @@ for f in uploaded_files:
 merged = pd.concat(dfs, ignore_index=True)
 
 # ==================================================
+# 📅 파일 1개 업로드 시 날짜 prefix
+# ==================================================
+def extract_prefix_from_filename(files):
+    for f in files:
+        stem = Path(f.name).stem
+        m = re.match(r"^(\d{2}\.\d{2})", stem)
+        if m:
+            return m.group(1)
+    return None
+
+def extract_earliest_date_prefix(df):
+    col_time = next((c for c in df.columns if "후원" in c and "시간" in c), None)
+    if not col_time:
+        return None
+    tmp = df[[col_time]].copy()
+    tmp[col_time] = pd.to_datetime(tmp[col_time], errors="coerce")
+    min_dt = tmp[col_time].min()
+    if pd.isna(min_dt):
+        return None
+    return min_dt.strftime("%m.%d")
+
+if len(uploaded_files) == 1:
+    prefix = extract_prefix_from_filename(uploaded_files)
+    if not prefix:
+        prefix = extract_earliest_date_prefix(merged)
+else:
+    prefix = None
+
+# ==================================================
 # 📊 웹 요약표
 # ==================================================
 def classify_heart_type(user_id: str) -> str:
@@ -98,13 +126,11 @@ def classify_heart_type(user_id: str) -> str:
     return "일반"
 
 tmp = merged.copy()
-
 col_id = next((c for c in tmp.columns if "후원" in c and "아이디" in c), None)
 col_heart = next((c for c in tmp.columns if "후원" in c and "하트" in c), None)
 col_bj = next((c for c in tmp.columns if "참여" in c and "BJ" in c), None)
 
 if col_id and col_heart and col_bj:
-
     tmp[col_heart] = pd.to_numeric(tmp[col_heart], errors="coerce").fillna(0)
     tmp.loc[tmp[col_heart] < 0, col_heart] = 0
 
@@ -168,86 +194,37 @@ def make_excel(df: pd.DataFrame, bj_name: str) -> BytesIO:
     return bio
 
 # ==================================================
-# 📦 총합산 파일
-# ==================================================
-def make_total_excel(df: pd.DataFrame) -> BytesIO:
-
-    wb = Workbook()
-    wb.remove(wb.active)
-
-    tmp = df.copy()
-
-    col_time = next((c for c in tmp.columns if "후원" in c and "시간" in c), None)
-    col_idnick = next((c for c in tmp.columns if "후원" in c and "아이디" in c), None)
-    col_heart = next((c for c in tmp.columns if "후원" in c and "하트" in c), None)
-    col_bj = next((c for c in tmp.columns if "참여" in c and "BJ" in c), None)
-
-    tmp[col_time] = pd.to_datetime(tmp[col_time], errors="coerce")
-    tmp["날짜"] = tmp[col_time].dt.date
-    tmp["시간"] = tmp[col_time].dt.time
-    tmp[col_heart] = pd.to_numeric(tmp[col_heart], errors="coerce").fillna(0)
-
-    def split_id_nickname(text):
-        if "(" in str(text):
-            id_part, nick_part = str(text).split("(", 1)
-            nick_part = nick_part.rstrip(")")
-        else:
-            id_part = text
-            nick_part = ""
-        return id_part.strip(), nick_part.strip()
-
-    tmp[["아이디", "닉네임"]] = tmp[col_idnick].apply(lambda x: pd.Series(split_id_nickname(x)))
-    tmp["구분"] = tmp["아이디"].apply(classify_heart_type)
-
-    ws = wb.create_sheet("전체상세")
-    ws.append(["날짜", "시간", "BJ", "아이디", "닉네임", "하트", "구분"])
-
-    for _, r in tmp.iterrows():
-        row = ws.max_row + 1
-        ws.cell(row=row, column=1, value=r["날짜"])
-        ws.cell(row=row, column=2, value=r["시간"])
-        ws.cell(row=row, column=3, value=r[col_bj])
-        ws.cell(row=row, column=4, value=r["아이디"])
-        ws.cell(row=row, column=5, value=r["닉네임"])
-        heart_cell = ws.cell(row=row, column=6, value=int(r[col_heart]))
-        heart_cell.number_format = "#,##0"
-        ws.cell(row=row, column=7, value=r["구분"])
-
-    auto_width(ws)
-    apply_border(ws)
-
-    bio = BytesIO()
-    wb.save(bio)
-    bio.seek(0)
-    return bio
-
-# ==================================================
-# 📥 다운로드 출력
+# 📥 다운로드
 # ==================================================
 st.success("집계 완료")
 
 if len(uploaded_files) > 1:
     total_file = make_total_excel(merged)
+    total_filename = f"{prefix}_총합산.xlsx" if prefix else "총합산.xlsx"
+
     st.download_button(
-        label="총합산.xlsx 다운로드",
+        label=f"{total_filename} 다운로드",
         data=total_file,
-        file_name="총합산.xlsx",
+        file_name=total_filename,
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
 
 for bj, views in result.items():
+    filename1 = f"{prefix}_{bj}_정산용.xlsx" if prefix else f"{bj}_정산용.xlsx"
+    filename2 = f"{prefix}_{bj}_BJ용.xlsx" if prefix else f"{bj}_BJ용.xlsx"
+
     st.subheader(bj)
 
     st.download_button(
-        label=f"{bj}_정산용.xlsx 다운로드",
+        label=f"{filename1} 다운로드",
         data=make_excel(views["정산용"], bj),
-        file_name=f"{bj}_정산용.xlsx",
+        file_name=filename1,
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
 
     st.download_button(
-        label=f"{bj}_BJ용.xlsx 다운로드",
+        label=f"{filename2} 다운로드",
         data=make_excel(views["BJ용"], bj),
-        file_name=f"{bj}_BJ용.xlsx",
+        file_name=filename2,
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
