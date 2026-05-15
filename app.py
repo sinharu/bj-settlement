@@ -277,7 +277,25 @@ def make_total_excel(df: pd.DataFrame) -> BytesIO | None:
     if not all([col_time, col_idnick, col_heart, col_bj]):
         return None
 
-    tmp[col_time] = pd.to_datetime(tmp[col_time], errors="coerce")
+    tmp[col_time] = (
+        tmp[col_time]
+        .astype(str)
+        .str.replace(r"[./]", "-", regex=True)
+        .str.replace("T", " ")
+        .str.strip()
+    )
+
+    tmp[col_time] = pd.to_datetime(
+        tmp[col_time],
+        errors="coerce",
+        format="mixed"
+    )
+
+    tmp["날짜"] = tmp[col_time].dt.date
+    tmp["시간"] = tmp[col_time].dt.time
+
+    tmp[col_heart] = pd.to_numeric(tmp[col_heart], errors="coerce").fillna(0)
+    tmp.loc[tmp[col_heart] < 0, col_heart] = 0
     tmp["날짜"] = tmp[col_time].dt.date
     tmp["시간"] = tmp[col_time].dt.time
     tmp[col_heart] = pd.to_numeric(tmp[col_heart], errors="coerce").fillna(0)
