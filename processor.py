@@ -51,9 +51,6 @@ def clean_and_prepare(df: pd.DataFrame):
         lambda x: pd.Series(split_id_nickname(x))
     )
 
-    # 숫자 ID 제거
-    df = df[~df["아이디"].str.isnumeric()]
-
     # 하트 숫자 정리
     df["후원하트"] = pd.to_numeric(df[col_heart], errors="coerce").fillna(0)
     df.loc[df["후원하트"] < 0, "후원하트"] = 0
