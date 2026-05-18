@@ -236,7 +236,7 @@ def make_excel(df: pd.DataFrame, bj_name: str) -> BytesIO:
     # 데이터
     for _, r in df.iterrows():
         row = ws.max_row + 1
-        ws.cell(row=row, column=1, value=str(r.get("후원아이디", "")))
+        ws.cell(row=row, column=1, value=str(r.get("아이디", "")))
         ws.cell(row=row, column=2, value=str(r.get("닉네임", "")))
 
         heart = pd.to_numeric(r.get("후원하트", 0), errors="coerce")
