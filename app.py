@@ -1,4 +1,5 @@
 import re
+import zipfile
 from pathlib import Path
 from io import BytesIO
 
@@ -216,7 +217,7 @@ if not result:
     st.error("집계 결과가 없습니다.")
     st.stop()
 
-def make_excel(df: pd.DataFrame, bj_name: str) -> BytesIO:
+def make_excel(df: pd.DataFrame, bj_name: str, detail_df=None) -> BytesIO:
     wb = Workbook()
     ws = wb.active
     ws.title = "정산표"
@@ -252,6 +253,82 @@ def make_excel(df: pd.DataFrame, bj_name: str) -> BytesIO:
     ws.column_dimensions["C"].width = 16
     auto_width(ws, min_w=18, max_w=45, pad=4)
     apply_border(ws)
+
+    # ==================================================
+    # 📄 상세내역 시트 추가
+    # ==================================================
+    if detail_df is not None and not detail_df.empty:
+
+        detail_ws = wb.create_sheet("상세내역")
+
+        detail_ws.append([
+            "날짜",
+            "시간",
+            "아이디",
+            "닉네임",
+            "하트",
+            "구분"
+        ])
+
+        format_header_row(detail_ws, 1)
+
+        detail_df = detail_df.sort_values(
+            by=["날짜", "시간"],
+            ascending=True
+        )
+
+        for _, r in detail_df.iterrows():
+
+            row = detail_ws.max_row + 1
+
+            detail_ws.cell(
+                row=row,
+                column=1,
+                value=r.get("날짜")
+            )
+
+            detail_ws.cell(
+                row=row,
+                column=2,
+                value=r.get("시간")
+            )
+
+            detail_ws.cell(
+                row=row,
+                column=3,
+                value=r.get("아이디")
+            )
+
+            detail_ws.cell(
+                row=row,
+                column=4,
+                value=r.get("닉네임")
+            )
+
+            heart_cell = detail_ws.cell(
+                row=row,
+                column=5,
+                value=int(r.get("후원하트", 0))
+            )
+
+            heart_cell.number_format = "#,##0"
+
+            detail_ws.cell(
+                row=row,
+                column=6,
+                value=r.get("구분")
+            )
+
+        detail_ws.column_dimensions["A"].width = 20
+        detail_ws.column_dimensions["B"].width = 18
+        detail_ws.column_dimensions["C"].width = 32
+        detail_ws.column_dimensions["D"].width = 26
+        detail_ws.column_dimensions["E"].width = 14
+        detail_ws.column_dimensions["F"].width = 12
+
+        auto_width(detail_ws, min_w=18, max_w=45, pad=4)
+
+        apply_border(detail_ws)
 
     bio = BytesIO()
     wb.save(bio)
@@ -425,10 +502,28 @@ def make_total_excel(df: pd.DataFrame) -> BytesIO | None:
     return bio
 
 
+def safe_filename(name: str) -> str:
+    return re.sub(r'[\\/:*?"<>|]+', "_", str(name)).strip() or "download"
+
+
+def make_downloads_zip(files: list[tuple[str, BytesIO]]) -> BytesIO:
+    bio = BytesIO()
+    with zipfile.ZipFile(bio, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for filename, file_data in files:
+            file_data.seek(0)
+            zf.writestr(filename, file_data.read())
+            file_data.seek(0)
+    bio.seek(0)
+    return bio
+
+
 # ==================================================
 # 📥 다운로드 UI
 # ==================================================
 st.success("집계 완료")
+
+settlement_files = []
+bj_files = []
 
 # 여러 파일 업로드일 때만 총합산 제공(요구사항)
 if len(uploaded_files) > 1:
@@ -443,23 +538,87 @@ if len(uploaded_files) > 1:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 
+for bj, views in result.items():
+    safe_bj = safe_filename(bj)
+
+    filename1 = (
+        f"{prefix}_{safe_bj}_정산용.xlsx"
+        if prefix else
+        f"{safe_bj}_정산용.xlsx"
+    )
+
+    filename2 = (
+        f"{prefix}_{safe_bj}_BJ용.xlsx"
+        if prefix else
+        f"{safe_bj}_BJ용.xlsx"
+    )
+
+    settlement_files.append((
+        filename1,
+        make_excel(
+            views["정산용"],
+            bj,
+            views.get("전체로그")
+        )
+    ))
+
+    bj_files.append((
+        filename2,
+        make_excel(
+            views["BJ용"],
+            bj,
+            views.get("전체로그")
+        )
+    ))
+
+if settlement_files:
+    zip_name = f"{prefix}_정산용_전체다운로드.zip" if prefix else "정산용_전체다운로드.zip"
+    st.download_button(
+        label="정산용 전체 ZIP 다운로드",
+        data=make_downloads_zip(settlement_files),
+        file_name=zip_name,
+        mime="application/zip"
+    )
+
+if bj_files:
+    zip_name = f"{prefix}_BJ용_전체다운로드.zip" if prefix else "BJ용_전체다운로드.zip"
+    st.download_button(
+        label="BJ용 전체 ZIP 다운로드",
+        data=make_downloads_zip(bj_files),
+        file_name=zip_name,
+        mime="application/zip"
+    )
+
 # BJ별 파일 제공 (파일 1개일 때만 prefix 붙임)
 for bj, views in result.items():
+
     st.subheader(bj)
 
-    filename1 = f"{prefix}_{bj}_정산용.xlsx" if prefix else f"{bj}_정산용.xlsx"
-    filename2 = f"{prefix}_{bj}_BJ용.xlsx" if prefix else f"{bj}_BJ용.xlsx"
+    filename1 = (
+        f"{prefix}_{safe_filename(bj)}_정산용.xlsx"
+        if prefix else
+        f"{safe_filename(bj)}_정산용.xlsx"
+    )
+
+    filename2 = (
+        f"{prefix}_{safe_filename(bj)}_BJ용.xlsx"
+        if prefix else
+        f"{safe_filename(bj)}_BJ용.xlsx"
+    )
+
+    file1 = next(data for name, data in settlement_files if name == filename1)
+    file2 = next(data for name, data in bj_files if name == filename2)
 
     st.download_button(
         label=f"{filename1} 다운로드",
-        data=make_excel(views["정산용"], bj),
+        data=file1,
         file_name=filename1,
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
 
     st.download_button(
         label=f"{filename2} 다운로드",
-        data=make_excel(views["BJ용"], bj),
+        data=file2,
         file_name=filename2,
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )

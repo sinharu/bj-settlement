@@ -2,7 +2,9 @@
 __pycache__/
 output/
 venv/
+.venv/
+.streamlit/secrets.toml
+streamlit*.log
 terminal_run.py
 *.csv
 *.xlsx
-
