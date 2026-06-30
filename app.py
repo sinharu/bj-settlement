@@ -6,7 +6,7 @@ from io import BytesIO
 import streamlit as st
 import pandas as pd
 from openpyxl import Workbook
-from openpyxl.styles import Border, Side, Alignment
+from openpyxl.styles import Border, Side, Alignment, Font, PatternFill
 
 from processor import process_dataframe
 
@@ -502,6 +502,220 @@ def make_total_excel(df: pd.DataFrame) -> BytesIO | None:
     return bio
 
 
+def _as_time_fraction(value) -> float:
+    if pd.isna(value):
+        return 1
+    if hasattr(value, "hour"):
+        return (value.hour * 3600 + value.minute * 60 + value.second) / 86400
+    try:
+        parsed = pd.to_datetime(str(value), errors="coerce")
+    except Exception:
+        return 1
+    if pd.isna(parsed):
+        return 1
+    return (parsed.hour * 3600 + parsed.minute * 60 + parsed.second) / 86400
+
+
+def _business_date(date_value, time_value):
+    parsed = pd.to_datetime(date_value, errors="coerce")
+    if pd.isna(parsed):
+        return None
+    business_dt = parsed
+    if _as_time_fraction(time_value) < 0.625:
+        business_dt = business_dt - pd.Timedelta(days=1)
+    return business_dt.date()
+
+
+def make_standard_settlement_excel(detail_df: pd.DataFrame, bj_name: str) -> BytesIO:
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "정산시트"
+    log_ws = wb.create_sheet("후원내역")
+
+    try:
+        wb.calculation.fullCalcOnLoad = True
+        wb.calculation.forceFullCalc = True
+    except Exception:
+        pass
+
+    header_fill = PatternFill("solid", fgColor="666666")
+    yellow_fill = PatternFill("solid", fgColor="FFF2CC")
+    input_fill = PatternFill("solid", fgColor="D9EAD3")
+    title_fill = PatternFill("solid", fgColor="D9EAF7")
+    header_font = Font(name="맑은 고딕", bold=True, color="FFFFFF")
+    bold_font = Font(name="맑은 고딕", bold=True)
+    normal_font = Font(name="맑은 고딕", size=11)
+
+    def style_header(cell):
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    def style_input(cell):
+        cell.fill = input_fill
+        cell.font = bold_font
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    ws.merge_cells("A1:G2")
+    ws["A1"] = f"{bj_name} 정산표"
+    ws["A1"].font = Font(name="맑은 고딕", size=14, bold=True)
+    ws["A1"].fill = title_fill
+    ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
+
+    ws["I3"] = "정산비율"
+    ws["J3"] = 0.45
+    ws["I4"] = "하트단가"
+    ws["J4"] = "=$J$3*100"
+    ws["I5"] = "협력지원율"
+    ws["J5"] = 0.05
+    for cell in ("I3", "I4", "I5"):
+        style_input(ws[cell])
+    for cell in ("J3", "J4", "J5"):
+        style_input(ws[cell])
+    ws["J3"].number_format = "0%"
+    ws["J4"].number_format = "#,##0"
+    ws["J5"].number_format = "0%"
+
+    sorted_detail = detail_df.copy() if detail_df is not None else pd.DataFrame()
+    if not sorted_detail.empty:
+        sorted_detail = sorted_detail.sort_values(by=["날짜", "시간"], ascending=True)
+    sorted_detail["정산일자"] = sorted_detail.apply(
+        lambda r: _business_date(r.get("날짜"), r.get("시간")),
+        axis=1
+    ) if not sorted_detail.empty else []
+
+    round_dates = [
+        d for d in sorted(sorted_detail["정산일자"].dropna().unique())
+    ] if not sorted_detail.empty else []
+    round_map = {d: f"{idx}회차" for idx, d in enumerate(round_dates, start=1)}
+    if not sorted_detail.empty:
+        sorted_detail["회차"] = sorted_detail["정산일자"].map(round_map).fillna("")
+
+    headers = [" ", "수량", "정산금", "상/벌금", "헤메", "총 정산금", "비고"]
+    for col, value in enumerate(headers, start=1):
+        cell = ws.cell(row=3, column=col, value=value)
+        style_header(cell)
+    ws["C3"] = '=TEXT($J$3,"0%")&" 정산금"'
+
+    first_round_row = 4
+    round_count = max(len(round_dates), 1)
+    for offset in range(round_count):
+        row = first_round_row + offset
+        round_name = round_map.get(round_dates[offset], f"{offset + 1}회차") if round_dates else "1회차"
+        ws.cell(row=row, column=1, value=round_name)
+        ws.cell(row=row, column=2, value=f'=SUMIF(\'후원내역\'!A:A,\'정산시트\'!A{row},\'후원내역\'!F:F)')
+        ws.cell(row=row, column=3, value=f"=B{row}*$J$3*100")
+        ws.cell(row=row, column=6, value=f"=C{row}+D{row}+E{row}")
+        ws.cell(row=row, column=7, value="")
+        for col in range(1, 8):
+            cell = ws.cell(row=row, column=col)
+            cell.font = normal_font
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+        for col in (2, 3, 4, 5, 6):
+            ws.cell(row=row, column=col).number_format = "#,##0"
+
+    total_row = first_round_row + round_count
+    ws.cell(row=total_row, column=1, value="합계")
+    ws.cell(row=total_row, column=2, value=f"=SUM(B{first_round_row}:B{total_row - 1})")
+    ws.cell(row=total_row, column=3, value=f"=SUM(C{first_round_row}:C{total_row - 1})")
+    ws.cell(row=total_row, column=4, value=f"=SUM(D{first_round_row}:D{total_row - 1})")
+    ws.cell(row=total_row, column=5, value=f"=SUM(E{first_round_row}:E{total_row - 1})")
+    ws.cell(row=total_row, column=6, value=f"=SUM(F{first_round_row}:F{total_row - 1})")
+    for col in range(1, 8):
+        cell = ws.cell(row=total_row, column=col)
+        cell.font = bold_font
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+    for col in (2, 3, 4, 5, 6):
+        ws.cell(row=total_row, column=col).number_format = "#,##0"
+
+    summary_header_row = total_row + 3
+    summary_headers = ["일자", "구분", "하트 개수", "공급가액", "세액", "합계", "비고"]
+    for col, value in enumerate(summary_headers, start=1):
+        cell = ws.cell(row=summary_header_row, column=col, value=value)
+        style_header(cell)
+
+    rows = [
+        ("일반하트", '=SUMIF(\'후원내역\'!G:G,"일반",\'후원내역\'!F:F)', "=C{row}*$J$3*100", "", ""),
+        ("협력지원금", "=C{normal_row}", "=C{row}*IF($J$5>1,$J$5/100,$J$5)*100", "", "J5 협력지원율 기준"),
+        ("제휴하트", '=SUMIF(\'후원내역\'!G:G,"제휴",\'후원내역\'!F:F)', "=C{row}*$J$3*100", "", ""),
+        ("헤메", "", "", "=D{row}*0.1", ""),
+        ("상/벌금", "", "", "=D{row}*0.1", "상벌금 합계"),
+    ]
+    normal_heart_row = summary_header_row + 1
+
+    for idx, (label, heart_formula, supply_formula, tax_formula, note) in enumerate(rows, start=1):
+        row = summary_header_row + idx
+        ws.cell(row=row, column=2, value=label)
+        ws.cell(row=row, column=2).fill = yellow_fill
+        ws.cell(row=row, column=2).alignment = Alignment(horizontal="center", vertical="center")
+        if heart_formula:
+            ws.cell(row=row, column=3, value=heart_formula.format(normal_row=normal_heart_row, row=row))
+        if supply_formula:
+            ws.cell(row=row, column=4, value=supply_formula.format(normal_row=normal_heart_row, row=row))
+        if tax_formula:
+            ws.cell(row=row, column=5, value=tax_formula.format(row=row))
+        else:
+            ws.cell(row=row, column=5, value=f"=D{row}*0.1")
+        ws.cell(row=row, column=6, value=f"=D{row}+E{row}")
+        ws.cell(row=row, column=7, value=note)
+        for col in range(3, 7):
+            ws.cell(row=row, column=col).number_format = "#,##0"
+        if label == "협력지원금":
+            ws.cell(row=row, column=3).number_format = "#,##0"
+
+    final_row = summary_header_row + len(rows) + 1
+    ws.cell(row=final_row, column=1, value="합계")
+    ws.cell(row=final_row, column=3, value=f"=C{summary_header_row + 1}+C{summary_header_row + 3}")
+    ws.cell(row=final_row, column=4, value=f"=SUM(D{summary_header_row + 1}:D{final_row - 1})")
+    ws.cell(row=final_row, column=5, value=f"=SUM(E{summary_header_row + 1}:E{final_row - 1})")
+    ws.cell(row=final_row, column=6, value=f"=SUM(F{summary_header_row + 1}:F{final_row - 1})")
+    for col in range(1, 8):
+        cell = ws.cell(row=final_row, column=col)
+        cell.font = bold_font
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+    for col in range(3, 7):
+        ws.cell(row=final_row, column=col).number_format = "#,##0"
+
+    for col, width in {
+        "A": 15, "B": 14, "C": 16, "D": 16, "E": 14, "F": 16, "G": 30,
+        "I": 14, "J": 12,
+    }.items():
+        ws.column_dimensions[col].width = width
+    for row in range(1, final_row + 1):
+        ws.row_dimensions[row].height = 22
+    apply_border(ws)
+
+    log_ws.append(["회차", "날짜", "시간", "아이디", "닉네임", "하트", "구분"])
+    for col in range(1, 8):
+        style_header(log_ws.cell(row=1, column=col))
+
+    for _, r in sorted_detail.iterrows():
+        row = log_ws.max_row + 1
+        log_ws.cell(row=row, column=1, value=r.get("회차", ""))
+        log_ws.cell(row=row, column=2, value=r.get("날짜"))
+        log_ws.cell(row=row, column=3, value=r.get("시간"))
+        log_ws.cell(row=row, column=4, value=r.get("아이디"))
+        log_ws.cell(row=row, column=5, value=r.get("닉네임"))
+        heart = pd.to_numeric(r.get("후원하트", 0), errors="coerce")
+        heart = 0 if pd.isna(heart) else int(max(heart, 0))
+        log_ws.cell(row=row, column=6, value=heart)
+        log_ws.cell(row=row, column=7, value=r.get("구분"))
+        log_ws.cell(row=row, column=6).number_format = "#,##0"
+
+    log_ws["B1"] = "날짜"
+    log_ws.freeze_panes = "A2"
+    for col, width in {
+        "A": 12, "B": 14, "C": 12, "D": 28, "E": 24, "F": 14, "G": 12,
+    }.items():
+        log_ws.column_dimensions[col].width = width
+    apply_border(log_ws)
+
+    bio = BytesIO()
+    wb.save(bio)
+    bio.seek(0)
+    return bio
+
+
 def safe_filename(name: str) -> str:
     return re.sub(r'[\\/:*?"<>|]+', "_", str(name)).strip() or "download"
 
@@ -524,6 +738,7 @@ st.success("집계 완료")
 
 settlement_files = []
 bj_files = []
+standard_settlement_files = []
 
 # 여러 파일 업로드일 때만 총합산 제공(요구사항)
 if len(uploaded_files) > 1:
@@ -553,12 +768,26 @@ for bj, views in result.items():
         f"{safe_bj}_BJ용.xlsx"
     )
 
+    filename3 = (
+        f"{prefix}_{safe_bj}_표준정산시트.xlsx"
+        if prefix else
+        f"{safe_bj}_표준정산시트.xlsx"
+    )
+
     settlement_files.append((
         filename1,
         make_excel(
             views["정산용"],
             bj,
             views.get("전체로그")
+        )
+    ))
+
+    standard_settlement_files.append((
+        filename3,
+        make_standard_settlement_excel(
+            views.get("전체로그"),
+            bj
         )
     ))
 
@@ -589,6 +818,15 @@ if bj_files:
         mime="application/zip"
     )
 
+if standard_settlement_files:
+    zip_name = f"{prefix}_표준정산시트_전체다운로드.zip" if prefix else "표준정산시트_전체다운로드.zip"
+    st.download_button(
+        label="표준정산시트 전체 ZIP 다운로드",
+        data=make_downloads_zip(standard_settlement_files),
+        file_name=zip_name,
+        mime="application/zip"
+    )
+
 # BJ별 파일 제공 (파일 1개일 때만 prefix 붙임)
 for bj, views in result.items():
 
@@ -606,8 +844,15 @@ for bj, views in result.items():
         f"{safe_filename(bj)}_BJ용.xlsx"
     )
 
+    filename3 = (
+        f"{prefix}_{safe_filename(bj)}_표준정산시트.xlsx"
+        if prefix else
+        f"{safe_filename(bj)}_표준정산시트.xlsx"
+    )
+
     file1 = next(data for name, data in settlement_files if name == filename1)
     file2 = next(data for name, data in bj_files if name == filename2)
+    file3 = next(data for name, data in standard_settlement_files if name == filename3)
 
     st.download_button(
         label=f"{filename1} 다운로드",
@@ -620,5 +865,12 @@ for bj, views in result.items():
         label=f"{filename2} 다운로드",
         data=file2,
         file_name=filename2,
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+
+    st.download_button(
+        label=f"{filename3} 다운로드",
+        data=file3,
+        file_name=filename3,
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
