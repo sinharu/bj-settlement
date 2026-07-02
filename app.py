@@ -94,7 +94,9 @@ if not uploaded_files:
 # 📥 파일 읽기
 # ==================================================
 dfs = []
-round_labels = [f"{idx}회차" for idx in range(1, len(uploaded_files) + 1)]
+MAX_STANDARD_ROUNDS = 15
+standard_round_count = min(len(uploaded_files), MAX_STANDARD_ROUNDS)
+round_labels = [f"{idx}회차" for idx in range(1, standard_round_count + 1)]
 for idx, f in enumerate(uploaded_files, start=1):
     try:
         if f.name.lower().endswith(".csv"):
@@ -102,7 +104,8 @@ for idx, f in enumerate(uploaded_files, start=1):
         else:
             df = pd.read_excel(f)
         if len(uploaded_files) > 1:
-            df["업로드회차"] = f"{idx}회차"
+            round_no = ((idx - 1) % MAX_STANDARD_ROUNDS) + 1
+            df["업로드회차"] = f"{round_no}회차"
         dfs.append(df)
     except Exception as e:
         st.error(f"{f.name} 읽기 실패: {e}")
