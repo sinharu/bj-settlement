@@ -94,12 +94,16 @@ if not uploaded_files:
 # 📥 파일 읽기
 # ==================================================
 dfs = []
-for f in uploaded_files:
+round_labels = [f"{idx}회차" for idx in range(1, len(uploaded_files) + 1)]
+for idx, f in enumerate(uploaded_files, start=1):
     try:
         if f.name.lower().endswith(".csv"):
-            dfs.append(pd.read_csv(f))
+            df = pd.read_csv(f)
         else:
-            dfs.append(pd.read_excel(f))
+            df = pd.read_excel(f)
+        if len(uploaded_files) > 1:
+            df["업로드회차"] = f"{idx}회차"
+        dfs.append(df)
     except Exception as e:
         st.error(f"{f.name} 읽기 실패: {e}")
 
@@ -526,7 +530,46 @@ def _business_date(date_value, time_value):
     return business_dt.date()
 
 
-def make_standard_settlement_excel(detail_df: pd.DataFrame, bj_name: str) -> BytesIO:
+def _save_workbook_with_cached_values(wb: Workbook, cached_values: dict[str, int | float]) -> BytesIO:
+    base = BytesIO()
+    wb.save(base)
+    base.seek(0)
+
+    patched = BytesIO()
+    with zipfile.ZipFile(base, "r") as zin, zipfile.ZipFile(patched, "w", zipfile.ZIP_DEFLATED) as zout:
+        for item in zin.infolist():
+            data = zin.read(item.filename)
+            if item.filename == "xl/worksheets/sheet1.xml":
+                xml = data.decode("utf-8")
+                for cell_ref, value in cached_values.items():
+                    if value is None:
+                        continue
+                    value_text = str(int(value)) if isinstance(value, float) and value.is_integer() else str(value)
+                    pattern = rf'(<c\b[^>]*\br="{re.escape(cell_ref)}"[^>]*>)(.*?)(</c>)'
+
+                    def repl(match):
+                        inner = match.group(2)
+                        if "<f" not in inner:
+                            return match.group(0)
+                        if re.search(r"<v>.*?</v>", inner, flags=re.DOTALL):
+                            inner = re.sub(r"<v>.*?</v>", f"<v>{value_text}</v>", inner, count=1, flags=re.DOTALL)
+                        else:
+                            inner = re.sub(r"(</f>)", rf"\1<v>{value_text}</v>", inner, count=1)
+                        return match.group(1) + inner + match.group(3)
+
+                    xml = re.sub(pattern, repl, xml, count=1, flags=re.DOTALL)
+                data = xml.encode("utf-8")
+            zout.writestr(item, data)
+
+    patched.seek(0)
+    return patched
+
+
+def make_standard_settlement_excel(
+    detail_df: pd.DataFrame,
+    bj_name: str,
+    all_round_labels: list[str] | None = None
+) -> BytesIO:
     wb = Workbook()
     ws = wb.active
     ws.title = "정산시트"
@@ -579,17 +622,38 @@ def make_standard_settlement_excel(detail_df: pd.DataFrame, bj_name: str) -> Byt
     sorted_detail = detail_df.copy() if detail_df is not None else pd.DataFrame()
     if not sorted_detail.empty:
         sorted_detail = sorted_detail.sort_values(by=["날짜", "시간"], ascending=True)
-    sorted_detail["정산일자"] = sorted_detail.apply(
-        lambda r: _business_date(r.get("날짜"), r.get("시간")),
-        axis=1
-    ) if not sorted_detail.empty else []
+    if "회차" in sorted_detail.columns and sorted_detail["회차"].notna().any():
+        sorted_detail["회차"] = sorted_detail["회차"].fillna("").astype(str)
+        round_names = all_round_labels or sorted(
+            [x for x in sorted_detail["회차"].dropna().unique() if x],
+            key=lambda x: int(re.search(r"\d+", str(x)).group()) if re.search(r"\d+", str(x)) else 9999
+        )
+    else:
+        sorted_detail["정산일자"] = sorted_detail.apply(
+            lambda r: _business_date(r.get("날짜"), r.get("시간")),
+            axis=1
+        ) if not sorted_detail.empty else []
+        round_dates = [
+            d for d in sorted(sorted_detail["정산일자"].dropna().unique())
+        ] if not sorted_detail.empty else []
+        round_map = {d: f"{idx}회차" for idx, d in enumerate(round_dates, start=1)}
+        if not sorted_detail.empty:
+            sorted_detail["회차"] = sorted_detail["정산일자"].map(round_map).fillna("")
+        round_names = [round_map[d] for d in round_dates]
 
-    round_dates = [
-        d for d in sorted(sorted_detail["정산일자"].dropna().unique())
-    ] if not sorted_detail.empty else []
-    round_map = {d: f"{idx}회차" for idx, d in enumerate(round_dates, start=1)}
+    heart_by_round = {}
+    normal_total = 0
+    partner_total = 0
     if not sorted_detail.empty:
-        sorted_detail["회차"] = sorted_detail["정산일자"].map(round_map).fillna("")
+        heart_by_round = (
+            sorted_detail.groupby("회차")["후원하트"]
+            .sum()
+            .to_dict()
+        )
+        normal_total = int(sorted_detail.loc[sorted_detail["구분"] == "일반", "후원하트"].sum())
+        partner_total = int(sorted_detail.loc[sorted_detail["구분"] == "제휴", "후원하트"].sum())
+
+    cached_values = {"J4": 45}
 
     headers = [" ", "수량", "정산금", "상/벌금", "헤메", "총 정산금", "비고"]
     for col, value in enumerate(headers, start=1):
@@ -598,14 +662,19 @@ def make_standard_settlement_excel(detail_df: pd.DataFrame, bj_name: str) -> Byt
     ws["C3"] = '=TEXT($J$3,"0%")&" 정산금"'
 
     first_round_row = 4
-    round_count = max(len(round_dates), 1)
+    round_count = max(len(round_names), 1)
     for offset in range(round_count):
         row = first_round_row + offset
-        round_name = round_map.get(round_dates[offset], f"{offset + 1}회차") if round_dates else "1회차"
+        round_name = round_names[offset] if round_names else "1회차"
+        round_heart = int(heart_by_round.get(round_name, 0))
+        round_amount = int(round_heart * 45)
         ws.cell(row=row, column=1, value=round_name)
         ws.cell(row=row, column=2, value=f'=SUMIF(\'후원내역\'!A:A,\'정산시트\'!A{row},\'후원내역\'!F:F)')
         ws.cell(row=row, column=3, value=f"=B{row}*$J$3*100")
         ws.cell(row=row, column=6, value=f"=C{row}+D{row}+E{row}")
+        cached_values[f"B{row}"] = round_heart
+        cached_values[f"C{row}"] = round_amount
+        cached_values[f"F{row}"] = round_amount
         ws.cell(row=row, column=7, value="")
         for col in range(1, 8):
             cell = ws.cell(row=row, column=col)
@@ -621,6 +690,13 @@ def make_standard_settlement_excel(detail_df: pd.DataFrame, bj_name: str) -> Byt
     ws.cell(row=total_row, column=4, value=f"=SUM(D{first_round_row}:D{total_row - 1})")
     ws.cell(row=total_row, column=5, value=f"=SUM(E{first_round_row}:E{total_row - 1})")
     ws.cell(row=total_row, column=6, value=f"=SUM(F{first_round_row}:F{total_row - 1})")
+    total_heart = int(sum(heart_by_round.get(round_name, 0) for round_name in round_names))
+    total_amount = int(total_heart * 45)
+    cached_values[f"B{total_row}"] = total_heart
+    cached_values[f"C{total_row}"] = total_amount
+    cached_values[f"D{total_row}"] = 0
+    cached_values[f"E{total_row}"] = 0
+    cached_values[f"F{total_row}"] = total_amount
     for col in range(1, 8):
         cell = ws.cell(row=total_row, column=col)
         cell.font = bold_font
@@ -662,6 +738,30 @@ def make_standard_settlement_excel(detail_df: pd.DataFrame, bj_name: str) -> Byt
             ws.cell(row=row, column=col).number_format = "#,##0"
         if label == "협력지원금":
             ws.cell(row=row, column=3).number_format = "#,##0"
+        if label == "일반하트":
+            amount = int(normal_total * 45)
+            tax = int(amount * 0.1)
+            cached_values[f"C{row}"] = normal_total
+            cached_values[f"D{row}"] = amount
+            cached_values[f"E{row}"] = tax
+            cached_values[f"F{row}"] = amount + tax
+        elif label == "협력지원금":
+            amount = int(normal_total * 5)
+            tax = int(amount * 0.1)
+            cached_values[f"C{row}"] = normal_total
+            cached_values[f"D{row}"] = amount
+            cached_values[f"E{row}"] = tax
+            cached_values[f"F{row}"] = amount + tax
+        elif label == "제휴하트":
+            amount = int(partner_total * 45)
+            tax = int(amount * 0.1)
+            cached_values[f"C{row}"] = partner_total
+            cached_values[f"D{row}"] = amount
+            cached_values[f"E{row}"] = tax
+            cached_values[f"F{row}"] = amount + tax
+        else:
+            cached_values[f"E{row}"] = 0
+            cached_values[f"F{row}"] = 0
 
     final_row = summary_header_row + len(rows) + 1
     ws.cell(row=final_row, column=1, value="합계")
@@ -669,6 +769,14 @@ def make_standard_settlement_excel(detail_df: pd.DataFrame, bj_name: str) -> Byt
     ws.cell(row=final_row, column=4, value=f"=SUM(D{summary_header_row + 1}:D{final_row - 1})")
     ws.cell(row=final_row, column=5, value=f"=SUM(E{summary_header_row + 1}:E{final_row - 1})")
     ws.cell(row=final_row, column=6, value=f"=SUM(F{summary_header_row + 1}:F{final_row - 1})")
+    support_amount = int(normal_total * 5)
+    final_heart = normal_total + partner_total
+    final_supply = int((normal_total * 45) + support_amount + (partner_total * 45))
+    final_tax = int(final_supply * 0.1)
+    cached_values[f"C{final_row}"] = final_heart
+    cached_values[f"D{final_row}"] = final_supply
+    cached_values[f"E{final_row}"] = final_tax
+    cached_values[f"F{final_row}"] = final_supply + final_tax
     for col in range(1, 8):
         cell = ws.cell(row=final_row, column=col)
         cell.font = bold_font
@@ -710,10 +818,7 @@ def make_standard_settlement_excel(detail_df: pd.DataFrame, bj_name: str) -> Byt
         log_ws.column_dimensions[col].width = width
     apply_border(log_ws)
 
-    bio = BytesIO()
-    wb.save(bio)
-    bio.seek(0)
-    return bio
+    return _save_workbook_with_cached_values(wb, cached_values)
 
 
 def safe_filename(name: str) -> str:
@@ -787,7 +892,8 @@ for bj, views in result.items():
         filename3,
         make_standard_settlement_excel(
             views.get("전체로그"),
-            bj
+            bj,
+            round_labels if len(uploaded_files) > 1 else None
         )
     ))
 

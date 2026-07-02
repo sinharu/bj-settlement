@@ -67,9 +67,14 @@ def clean_and_prepare(df: pd.DataFrame):
         df["날짜"] = None
         df["시간"] = None
 
+    if "업로드회차" in df.columns:
+        df["회차"] = df["업로드회차"]
+    else:
+        df["회차"] = None
+
     df["참여BJ"] = df[col_bj]
 
-    return df[["참여BJ", "날짜", "시간", "아이디", "닉네임", "후원하트", "구분"]]
+    return df[["참여BJ", "회차", "날짜", "시간", "아이디", "닉네임", "후원하트", "구분"]]
 
 
 # ==========================================
