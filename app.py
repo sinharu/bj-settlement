@@ -104,7 +104,11 @@ for idx, f in enumerate(uploaded_files, start=1):
         else:
             df = pd.read_excel(f)
         if len(uploaded_files) > 1:
-            round_no = ((idx - 1) % MAX_STANDARD_ROUNDS) + 1
+            if len(uploaded_files) > MAX_STANDARD_ROUNDS:
+                round_no = ((idx - 1) // 2) + 1
+            else:
+                round_no = idx
+            round_no = min(round_no, MAX_STANDARD_ROUNDS)
             df["업로드회차"] = f"{round_no}회차"
         dfs.append(df)
     except Exception as e:
