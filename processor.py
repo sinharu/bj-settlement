@@ -60,7 +60,7 @@ def clean_and_prepare(df: pd.DataFrame):
 
     # 날짜/시간 처리
     if col_time:
-        df["후원시간"] = pd.to_datetime(df[col_time], errors="coerce")
+        df["후원시간"] = pd.to_datetime(df[col_time], errors="coerce", format="mixed")
         df["날짜"] = df["후원시간"].dt.date
         df["시간"] = df["후원시간"].dt.time
     else:

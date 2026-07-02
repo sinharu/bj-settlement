@@ -93,26 +93,61 @@ if not uploaded_files:
 # ==================================================
 # 📥 파일 읽기
 # ==================================================
+def parse_donation_times(series):
+    return pd.to_datetime(series, errors="coerce", format="mixed")
+
+
+def file_business_date(df):
+    col_time = next((c for c in df.columns if "후원" in c and "시간" in c), None)
+    if not col_time:
+        return None
+
+    times = parse_donation_times(df[col_time]).dropna()
+    if times.empty:
+        return None
+
+    business_dates = times.apply(
+        lambda x: (x - pd.Timedelta(days=1)).date()
+        if (x.hour * 3600 + x.minute * 60 + x.second) / 86400 < 0.625
+        else x.date()
+    )
+    return business_dates.min()
+
+
 dfs = []
 MAX_STANDARD_ROUNDS = 15
-standard_round_count = min(len(uploaded_files), MAX_STANDARD_ROUNDS)
-round_labels = [f"{idx}회차" for idx in range(1, standard_round_count + 1)]
+file_entries = []
 for idx, f in enumerate(uploaded_files, start=1):
     try:
         if f.name.lower().endswith(".csv"):
             df = pd.read_csv(f)
         else:
             df = pd.read_excel(f)
-        if len(uploaded_files) > 1:
-            if len(uploaded_files) > MAX_STANDARD_ROUNDS:
-                round_no = ((idx - 1) // 2) + 1
-            else:
-                round_no = idx
-            round_no = min(round_no, MAX_STANDARD_ROUNDS)
-            df["업로드회차"] = f"{round_no}회차"
-        dfs.append(df)
+        file_entries.append((idx, df, file_business_date(df)))
     except Exception as e:
         st.error(f"{f.name} 읽기 실패: {e}")
+
+if len(file_entries) > 1:
+    business_dates = sorted({d for _, _, d in file_entries if d is not None})
+    date_to_round = {
+        d: idx
+        for idx, d in enumerate(business_dates[:MAX_STANDARD_ROUNDS], start=1)
+    }
+
+    assigned_rounds = []
+    for idx, df, business_date in file_entries:
+        if business_date in date_to_round:
+            round_no = date_to_round[business_date]
+        else:
+            round_no = min(((idx - 1) // 2) + 1, MAX_STANDARD_ROUNDS)
+        df["업로드회차"] = f"{round_no}회차"
+        assigned_rounds.append(round_no)
+        dfs.append(df)
+else:
+    dfs = [df for _, df, _ in file_entries]
+
+standard_round_count = min(max(assigned_rounds) if len(file_entries) > 1 and assigned_rounds else len(uploaded_files), MAX_STANDARD_ROUNDS)
+round_labels = [f"{idx}회차" for idx in range(1, standard_round_count + 1)]
 
 if not dfs:
     st.error("읽을 수 있는 파일이 없습니다.")
