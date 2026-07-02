@@ -94,24 +94,72 @@ if not uploaded_files:
 # 📥 파일 읽기
 # ==================================================
 def parse_donation_times(series):
-    return pd.to_datetime(series, errors="coerce", format="mixed")
+    text = series.astype(str).str.strip()
+    text = text.str.replace("오전", "AM", regex=False).str.replace("오후", "PM", regex=False)
+    parsed = pd.to_datetime(text, errors="coerce", format="mixed")
+
+    missing = parsed.isna()
+    if missing.any():
+        numeric = pd.to_numeric(series[missing], errors="coerce")
+        excel_dates = pd.to_datetime(numeric, errors="coerce", unit="D", origin="1899-12-30")
+        parsed.loc[missing] = excel_dates
+
+    return parsed
 
 
-def file_business_date(df):
+def donation_business_date(dt):
+    if pd.isna(dt):
+        return None
+    return (
+        dt - pd.Timedelta(days=1)
+        if (dt.hour * 3600 + dt.minute * 60 + dt.second) / 86400 < 0.625
+        else dt
+    ).date()
+
+
+def business_date_from_filename(filename):
+    stem = Path(filename).stem
+
+    md = re.search(r"(?<!\d)(\d{1,2})[.\-_월 ]+(\d{1,2})(?:일)?(?!\d)", stem)
+    if md:
+        month, day = map(int, md.groups())
+        return pd.Timestamp(year=pd.Timestamp.today().year, month=month, day=day).date()
+
+    ymd = re.search(r"(20\d{2})(\d{2})(\d{2})(\d{2})?", stem)
+    if ymd:
+        year, month, day, hour = ymd.groups()
+        dt = pd.Timestamp(year=int(year), month=int(month), day=int(day), hour=int(hour or 0))
+        return donation_business_date(dt)
+
+    return None
+
+
+def file_business_date(df, filename):
     col_time = next((c for c in df.columns if "후원" in c and "시간" in c), None)
     if not col_time:
-        return None
+        return business_date_from_filename(filename)
 
     times = parse_donation_times(df[col_time]).dropna()
     if times.empty:
-        return None
+        return business_date_from_filename(filename)
 
-    business_dates = times.apply(
-        lambda x: (x - pd.Timedelta(days=1)).date()
-        if (x.hour * 3600 + x.minute * 60 + x.second) / 86400 < 0.625
-        else x.date()
-    )
+    business_dates = times.apply(donation_business_date)
     return business_dates.min()
+
+
+def build_date_to_round(business_dates):
+    dates = sorted({d for d in business_dates if d is not None})
+    if len(dates) <= MAX_STANDARD_ROUNDS:
+        return {
+            d: idx
+            for idx, d in enumerate(dates, start=1)
+        }
+
+    date_to_round = {}
+    for track in (dates[0::2], dates[1::2]):
+        for idx, d in enumerate(track[:MAX_STANDARD_ROUNDS], start=1):
+            date_to_round[d] = idx
+    return date_to_round
 
 
 dfs = []
@@ -123,16 +171,12 @@ for idx, f in enumerate(uploaded_files, start=1):
             df = pd.read_csv(f)
         else:
             df = pd.read_excel(f)
-        file_entries.append((idx, df, file_business_date(df)))
+        file_entries.append((idx, df, file_business_date(df, f.name)))
     except Exception as e:
         st.error(f"{f.name} 읽기 실패: {e}")
 
 if len(file_entries) > 1:
-    business_dates = sorted({d for _, _, d in file_entries if d is not None})
-    date_to_round = {
-        d: idx
-        for idx, d in enumerate(business_dates[:MAX_STANDARD_ROUNDS], start=1)
-    }
+    date_to_round = build_date_to_round([d for _, _, d in file_entries])
 
     assigned_rounds = []
     for idx, df, business_date in file_entries:

@@ -1,6 +1,20 @@
 import pandas as pd
 
 
+def parse_donation_times(series):
+    text = series.astype(str).str.strip()
+    text = text.str.replace("오전", "AM", regex=False).str.replace("오후", "PM", regex=False)
+    parsed = pd.to_datetime(text, errors="coerce", format="mixed")
+
+    missing = parsed.isna()
+    if missing.any():
+        numeric = pd.to_numeric(series[missing], errors="coerce")
+        excel_dates = pd.to_datetime(numeric, errors="coerce", unit="D", origin="1899-12-30")
+        parsed.loc[missing] = excel_dates
+
+    return parsed
+
+
 # ==========================================
 # 🔹 ID / 닉네임 분리
 # ==========================================
@@ -60,7 +74,7 @@ def clean_and_prepare(df: pd.DataFrame):
 
     # 날짜/시간 처리
     if col_time:
-        df["후원시간"] = pd.to_datetime(df[col_time], errors="coerce", format="mixed")
+        df["후원시간"] = parse_donation_times(df[col_time])
         df["날짜"] = df["후원시간"].dt.date
         df["시간"] = df["후원시간"].dt.time
     else:
