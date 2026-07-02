@@ -551,10 +551,9 @@ def _save_workbook_with_cached_values(wb: Workbook, cached_values: dict[str, int
                         inner = match.group(2)
                         if "<f" not in inner:
                             return match.group(0)
-                        if re.search(r"<v>.*?</v>", inner, flags=re.DOTALL):
-                            inner = re.sub(r"<v>.*?</v>", f"<v>{value_text}</v>", inner, count=1, flags=re.DOTALL)
-                        else:
-                            inner = re.sub(r"(</f>)", rf"\1<v>{value_text}</v>", inner, count=1)
+                        inner = re.sub(r"<v\b[^>]*/>", "", inner, flags=re.DOTALL)
+                        inner = re.sub(r"<v\b[^>]*>.*?</v>", "", inner, flags=re.DOTALL)
+                        inner = re.sub(r"(</f>)", rf"\1<v>{value_text}</v>", inner, count=1)
                         return match.group(1) + inner + match.group(3)
 
                     xml = re.sub(pattern, repl, xml, count=1, flags=re.DOTALL)
