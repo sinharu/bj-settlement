@@ -8,7 +8,12 @@ import pandas as pd
 from openpyxl import Workbook
 from openpyxl.styles import Border, Side, Alignment, Font, PatternFill
 
-from processor import process_dataframe
+from processor import normalize_bj_name, process_dataframe
+
+
+BUSINESS_DAY_CUTOFF_HOUR = 14
+BUSINESS_DAY_CUTOFF_FRACTION = BUSINESS_DAY_CUTOFF_HOUR / 24
+MAX_STANDARD_ROUNDS = 15
 
 
 st.set_page_config(page_title="BJ 하트 집계", layout="centered")
@@ -77,7 +82,7 @@ def format_header_row(ws, header_row=1):
 # 📌 화면 시작
 # ==================================================
 st.title("BJ 하트 집계 (BJ 전달용)")
-st.caption("CSV / XLSX 업로드 → 웹 요약표 확인 → BJ별 엑셀 다운로드")
+st.caption("CSV / XLSX 업로드 → 웹 요약표 확인 → BJ별 엑셀 다운로드 · 정산일 기준 14:00")
 
 uploaded_files = st.file_uploader(
     "CSV 또는 XLSX 파일을 업로드하세요",
@@ -112,7 +117,7 @@ def donation_business_date(dt):
         return None
     return (
         dt - pd.Timedelta(days=1)
-        if (dt.hour * 3600 + dt.minute * 60 + dt.second) / 86400 < 0.625
+        if (dt.hour * 3600 + dt.minute * 60 + dt.second) / 86400 < BUSINESS_DAY_CUTOFF_FRACTION
         else dt
     ).date()
 
@@ -143,8 +148,19 @@ def file_business_date(df, filename):
     if times.empty:
         return business_date_from_filename(filename)
 
-    business_dates = times.apply(donation_business_date)
-    return business_dates.min()
+    business_dates = times.apply(donation_business_date).dropna()
+    if business_dates.empty:
+        return business_date_from_filename(filename)
+
+    # 한두 건의 경계시간 기록이 파일 전체 날짜를 전날로 바꾸지 않도록
+    # 파일 안에서 가장 많이 나타나는 정산일을 대표 날짜로 사용한다.
+    counts = business_dates.value_counts()
+    top_count = counts.max()
+    candidates = sorted(counts[counts == top_count].index)
+    filename_date = business_date_from_filename(filename)
+    if filename_date in candidates:
+        return filename_date
+    return candidates[0]
 
 
 def build_date_to_round(business_dates):
@@ -163,7 +179,6 @@ def build_date_to_round(business_dates):
 
 
 dfs = []
-MAX_STANDARD_ROUNDS = 15
 file_entries = []
 for idx, f in enumerate(uploaded_files, start=1):
     try:
@@ -190,7 +205,11 @@ if len(file_entries) > 1:
 else:
     dfs = [df for _, df, _ in file_entries]
 
-standard_round_count = min(max(assigned_rounds) if len(file_entries) > 1 and assigned_rounds else len(uploaded_files), MAX_STANDARD_ROUNDS)
+standard_round_count = (
+    MAX_STANDARD_ROUNDS
+    if len(file_entries) > 1
+    else min(len(file_entries), MAX_STANDARD_ROUNDS)
+)
 round_labels = [f"{idx}회차" for idx in range(1, standard_round_count + 1)]
 
 if not dfs:
@@ -198,6 +217,9 @@ if not dfs:
     st.stop()
 
 merged = pd.concat(dfs, ignore_index=True)
+merged_bj_col = next((c for c in merged.columns if "참여" in c and "BJ" in c), None)
+if merged_bj_col:
+    merged[merged_bj_col] = merged[merged_bj_col].map(normalize_bj_name)
 
 
 # ==================================================
@@ -611,7 +633,7 @@ def _business_date(date_value, time_value):
     if pd.isna(parsed):
         return None
     business_dt = parsed
-    if _as_time_fraction(time_value) < 0.625:
+    if _as_time_fraction(time_value) < BUSINESS_DAY_CUTOFF_FRACTION:
         business_dt = business_dt - pd.Timedelta(days=1)
     return business_dt.date()
 
@@ -940,7 +962,8 @@ if len(uploaded_files) > 1:
             label="총합산.xlsx 다운로드",
             data=total_file,
             file_name="총합산.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            key="download_total"
         )
 
 for bj, views in result.items():
@@ -997,7 +1020,8 @@ if settlement_files:
         label="정산용 전체 ZIP 다운로드",
         data=make_downloads_zip(settlement_files),
         file_name=zip_name,
-        mime="application/zip"
+        mime="application/zip",
+        key="download_settlement_zip"
     )
 
 if bj_files:
@@ -1006,7 +1030,8 @@ if bj_files:
         label="BJ용 전체 ZIP 다운로드",
         data=make_downloads_zip(bj_files),
         file_name=zip_name,
-        mime="application/zip"
+        mime="application/zip",
+        key="download_bj_zip"
     )
 
 if standard_settlement_files:
@@ -1015,11 +1040,12 @@ if standard_settlement_files:
         label="표준정산시트 전체 ZIP 다운로드",
         data=make_downloads_zip(standard_settlement_files),
         file_name=zip_name,
-        mime="application/zip"
+        mime="application/zip",
+        key="download_standard_zip"
     )
 
 # BJ별 파일 제공 (파일 1개일 때만 prefix 붙임)
-for bj, views in result.items():
+for bj_index, (bj, views) in enumerate(result.items(), start=1):
 
     st.subheader(bj)
 
@@ -1049,19 +1075,22 @@ for bj, views in result.items():
         label=f"{filename1} 다운로드",
         data=file1,
         file_name=filename1,
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key=f"download_settlement_{bj_index}"
     )
 
     st.download_button(
         label=f"{filename2} 다운로드",
         data=file2,
         file_name=filename2,
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key=f"download_bj_{bj_index}"
     )
 
     st.download_button(
         label=f"{filename3} 다운로드",
         data=file3,
         file_name=filename3,
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key=f"download_standard_{bj_index}"
     )

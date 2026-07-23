@@ -1,4 +1,13 @@
+import unicodedata
+
 import pandas as pd
+
+
+def normalize_bj_name(value) -> str:
+    """같은 BJ가 앞뒤 공백 차이로 분리되지 않도록 이름을 표준화한다."""
+    if pd.isna(value):
+        return ""
+    return unicodedata.normalize("NFC", str(value)).strip()
 
 
 def parse_donation_times(series):
@@ -86,7 +95,8 @@ def clean_and_prepare(df: pd.DataFrame):
     else:
         df["회차"] = None
 
-    df["참여BJ"] = df[col_bj]
+    df["참여BJ"] = df[col_bj].map(normalize_bj_name)
+    df = df[df["참여BJ"] != ""].copy()
 
     return df[["참여BJ", "회차", "날짜", "시간", "아이디", "닉네임", "후원하트", "구분"]]
 
