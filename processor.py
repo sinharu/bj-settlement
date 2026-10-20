@@ -3,6 +3,15 @@ import unicodedata
 import pandas as pd
 
 
+FORMAT_HEART = "하트"
+FORMAT_KRW = "원화"
+
+STANDARD_COLUMNS = [
+    "형식", "참여BJ", "회차", "후원시간", "날짜", "시간",
+    "아이디", "닉네임", "후원하트", "구분", "후원종류",
+]
+
+
 def normalize_bj_name(value) -> str:
     """같은 BJ가 앞뒤 공백 차이로 분리되지 않도록 이름을 표준화한다."""
     if pd.isna(value):
@@ -56,49 +65,85 @@ def classify_heart(user_id: str) -> str:
 # ==========================================
 # 🔹 전처리 + 표준화
 # ==========================================
-def clean_and_prepare(df: pd.DataFrame):
+def detect_format(df: pd.DataFrame) -> str | None:
+    """필수 열 이름으로 하트/원화 후원 형식을 구분한다."""
+    columns = [c for c in df.columns if isinstance(c, str)]
+    if {"닉네임", "스트리머", "종류", "개수", "시간"}.issubset(
+        {c.strip() for c in columns}
+    ):
+        return FORMAT_KRW
 
-    df = df.copy()
+    if all(
+        any(first in c and second in c for c in columns)
+        for first, second in [("후원", "아이디"), ("후원", "하트"), ("참여", "BJ")]
+    ):
+        return FORMAT_HEART
 
-    # 컬럼 자동 탐색
-    col_idnick = next((c for c in df.columns if "후원" in c and "아이디" in c), None)
-    col_heart = next((c for c in df.columns if "후원" in c and "하트" in c), None)
-    col_bj = next((c for c in df.columns if "참여" in c and "BJ" in c), None)
-    col_time = next((c for c in df.columns if "후원" in c and "시간" in c), None)
+    return None
 
-    if not all([col_idnick, col_heart, col_bj]):
+
+def to_standard(df: pd.DataFrame) -> pd.DataFrame | None:
+    """후원 수량의 단위를 유지하면서 두 입력 형식을 공통 열로 변환한다."""
+    donation_format = detect_format(df)
+    if donation_format is None:
         return None
 
-    # 아이디 / 닉네임 분리
-    df[["아이디", "닉네임"]] = df[col_idnick].apply(
-        lambda x: pd.Series(split_id_nickname(x))
+    df = df.reset_index(drop=True).copy()
+    if donation_format == FORMAT_KRW:
+        columns = {c.strip(): c for c in df.columns if isinstance(c, str)}
+        if "등록" in columns:
+            registered = df[columns["등록"]].fillna("").astype(str).str.strip()
+            df = df.loc[registered == "등록"].copy()
+
+        standard = pd.DataFrame(index=df.index)
+        nickname = df[columns["닉네임"]]
+        if "아이디" in columns:
+            nickname = nickname.fillna(df[columns["아이디"]])
+        standard["닉네임"] = nickname.map(normalize_bj_name)
+        standard["아이디"] = standard["닉네임"]
+        standard["구분"] = "일반"
+        standard["후원종류"] = df[columns["종류"]].fillna("").astype(str).str.strip()
+        col_bj = columns["스트리머"]
+        col_amount = columns["개수"]
+        col_time = columns["시간"]
+    else:
+        columns = [c for c in df.columns if isinstance(c, str)]
+        col_idnick = next(c for c in columns if "후원" in c and "아이디" in c)
+        col_amount = next(c for c in columns if "후원" in c and "하트" in c)
+        col_bj = next(c for c in columns if "참여" in c and "BJ" in c)
+        col_time = next((c for c in columns if "후원" in c and "시간" in c), None)
+        standard = pd.DataFrame(
+            df[col_idnick].map(split_id_nickname).tolist(),
+            index=df.index,
+            columns=["아이디", "닉네임"],
+        )
+        standard["구분"] = standard["아이디"].map(classify_heart)
+        standard["후원종류"] = ""
+
+    # 호환 열 이름을 유지하며 하트 수 또는 원화 금액을 정수로 보관한다.
+    standard["후원하트"] = (
+        pd.to_numeric(df[col_amount], errors="coerce").fillna(0).clip(lower=0).astype("int64")
     )
+    standard["형식"] = donation_format
+    standard["참여BJ"] = df[col_bj].map(normalize_bj_name)
+    standard["회차"] = df["업로드회차"] if "업로드회차" in df.columns else None
 
-    # 하트 숫자 정리
-    df["후원하트"] = pd.to_numeric(df[col_heart], errors="coerce").fillna(0)
-    df.loc[df["후원하트"] < 0, "후원하트"] = 0
-
-    # 하트 타입
-    df["구분"] = df["아이디"].apply(classify_heart)
-
-    # 날짜/시간 처리
-    if col_time:
-        df["후원시간"] = parse_donation_times(df[col_time])
-        df["날짜"] = df["후원시간"].dt.date
-        df["시간"] = df["후원시간"].dt.time
+    if col_time is not None:
+        standard["후원시간"] = parse_donation_times(df[col_time])
+        standard["날짜"] = standard["후원시간"].dt.date
+        standard["시간"] = standard["후원시간"].dt.time
     else:
-        df["날짜"] = None
-        df["시간"] = None
+        standard["후원시간"] = pd.Series(pd.NaT, index=df.index, dtype="datetime64[ns]")
+        standard["날짜"] = None
+        standard["시간"] = None
 
-    if "업로드회차" in df.columns:
-        df["회차"] = df["업로드회차"]
-    else:
-        df["회차"] = None
+    return standard.loc[standard["참여BJ"] != "", STANDARD_COLUMNS].reset_index(drop=True)
 
-    df["참여BJ"] = df[col_bj].map(normalize_bj_name)
-    df = df[df["참여BJ"] != ""].copy()
 
-    return df[["참여BJ", "회차", "날짜", "시간", "아이디", "닉네임", "후원하트", "구분"]]
+def clean_and_prepare(df: pd.DataFrame):
+    if "형식" in df.columns:
+        return df.copy()
+    return to_standard(df)
 
 
 # ==========================================
@@ -141,7 +186,8 @@ def process_dataframe(df: pd.DataFrame):
             how="left"
         )
 
-        merged["구분"] = merged["아이디"].apply(classify_heart)
+        # 원화 닉네임에 @가 있어도 표준화 단계에서 정한 일반 구분을 유지한다.
+        merged["구분"] = merged["아이디"].map(bj_df.groupby("아이디")["구분"].first())
 
         # =====================================
         # 2️⃣ 정산용 정렬
@@ -160,7 +206,7 @@ def process_dataframe(df: pd.DataFrame):
         result[bj] = {
             "정산용": settlement_view,
             "BJ용": bj_view,
-            "전체로그": bj_df.reset_index(drop=True)
+            "전체로그": bj_df[STANDARD_COLUMNS].reset_index(drop=True)
         }
 
     return result

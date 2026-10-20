@@ -8,12 +8,14 @@ import pandas as pd
 from openpyxl import Workbook
 from openpyxl.styles import Border, Side, Alignment, Font, PatternFill
 
-from processor import normalize_bj_name, process_dataframe
+from processor import FORMAT_KRW, detect_format, process_dataframe, to_standard
 
 
 BUSINESS_DAY_CUTOFF_HOUR = 14
 BUSINESS_DAY_CUTOFF_FRACTION = BUSINESS_DAY_CUTOFF_HOUR / 24
 MAX_STANDARD_ROUNDS = 15
+HEART_UNIT_PRICE = 100  # 하트 1개 = 100원
+KRW_DONATION_TYPES = ["투네이션", "펀네이션", "계좌후원"]
 
 
 st.set_page_config(page_title="BJ 하트 집계", layout="centered")
@@ -82,7 +84,10 @@ def format_header_row(ws, header_row=1):
 # 📌 화면 시작
 # ==================================================
 st.title("BJ 하트 집계 (BJ 전달용)")
-st.caption("CSV / XLSX 업로드 → 웹 요약표 확인 → BJ별 엑셀 다운로드 · 정산일 기준 14:00")
+st.caption(
+    "CSV / XLSX 업로드 → 웹 요약표 확인 → BJ별 엑셀 다운로드 · 정산일 기준 14:00 · "
+    "팬더티비 하트 파일과 원화 후원 파일은 자동으로 구분됩니다"
+)
 
 uploaded_files = st.file_uploader(
     "CSV 또는 XLSX 파일을 업로드하세요",
@@ -98,20 +103,6 @@ if not uploaded_files:
 # ==================================================
 # 📥 파일 읽기
 # ==================================================
-def parse_donation_times(series):
-    text = series.astype(str).str.strip()
-    text = text.str.replace("오전", "AM", regex=False).str.replace("오후", "PM", regex=False)
-    parsed = pd.to_datetime(text, errors="coerce", format="mixed")
-
-    missing = parsed.isna()
-    if missing.any():
-        numeric = pd.to_numeric(series[missing], errors="coerce")
-        excel_dates = pd.to_datetime(numeric, errors="coerce", unit="D", origin="1899-12-30")
-        parsed.loc[missing] = excel_dates
-
-    return parsed
-
-
 def donation_business_date(dt):
     if pd.isna(dt):
         return None
@@ -139,12 +130,8 @@ def business_date_from_filename(filename):
     return None
 
 
-def file_business_date(df, filename):
-    col_time = next((c for c in df.columns if "후원" in c and "시간" in c), None)
-    if not col_time:
-        return business_date_from_filename(filename)
-
-    times = parse_donation_times(df[col_time]).dropna()
+def file_business_date(std_df, filename):
+    times = std_df["후원시간"].dropna()
     if times.empty:
         return business_date_from_filename(filename)
 
@@ -178,32 +165,48 @@ def build_date_to_round(business_dates):
     return date_to_round
 
 
-dfs = []
+# 파일마다 형식(팬더티비 하트 / 원화 후원)을 감지해 표준 프레임으로 바꾼다.
 file_entries = []
 for idx, f in enumerate(uploaded_files, start=1):
     try:
         if f.name.lower().endswith(".csv"):
-            df = pd.read_csv(f)
+            raw = pd.read_csv(f)
         else:
-            df = pd.read_excel(f)
-        file_entries.append((idx, df, file_business_date(df, f.name)))
+            raw = pd.read_excel(f)  # 첫 시트(원화 후원 파일은 '리스트')만 읽는다
+        file_format = detect_format(raw)
+        std_df = to_standard(raw) if file_format else None
+        if std_df is None:
+            st.error(f"{f.name}: 지원하지 않는 파일 형식입니다. (팬더티비 하트 내역 또는 원화 후원 리스트만 가능)")
+            continue
+        file_entries.append((idx, std_df, file_business_date(std_df, f.name), file_format))
     except Exception as e:
         st.error(f"{f.name} 읽기 실패: {e}")
 
-if len(file_entries) > 1:
-    date_to_round = build_date_to_round([d for _, _, d in file_entries])
+if not file_entries:
+    st.error("읽을 수 있는 파일이 없습니다.")
+    st.stop()
 
-    assigned_rounds = []
-    for idx, df, business_date in file_entries:
+formats = {fmt for _, _, _, fmt in file_entries}
+if len(formats) > 1:
+    st.error("팬더티비(하트) 파일과 원화 후원 파일은 섞어서 올릴 수 없습니다. 같은 형식끼리 따로 올려주세요.")
+    st.stop()
+data_format = formats.pop()
+IS_KRW = data_format == FORMAT_KRW
+AMOUNT_LABEL = "후원금액" if IS_KRW else "후원하트"
+
+dfs = []
+if len(file_entries) > 1:
+    date_to_round = build_date_to_round([d for _, _, d, _ in file_entries])
+
+    for idx, std_df, business_date, _ in file_entries:
         if business_date in date_to_round:
             round_no = date_to_round[business_date]
         else:
             round_no = min(((idx - 1) // 2) + 1, MAX_STANDARD_ROUNDS)
-        df["업로드회차"] = f"{round_no}회차"
-        assigned_rounds.append(round_no)
-        dfs.append(df)
+        std_df["회차"] = f"{round_no}회차"
+        dfs.append(std_df)
 else:
-    dfs = [df for _, df, _ in file_entries]
+    dfs = [std_df for _, std_df, _, _ in file_entries]
 
 standard_round_count = (
     MAX_STANDARD_ROUNDS
@@ -212,14 +215,10 @@ standard_round_count = (
 )
 round_labels = [f"{idx}회차" for idx in range(1, standard_round_count + 1)]
 
-if not dfs:
-    st.error("읽을 수 있는 파일이 없습니다.")
-    st.stop()
-
 merged = pd.concat(dfs, ignore_index=True)
-merged_bj_col = next((c for c in merged.columns if "참여" in c and "BJ" in c), None)
-if merged_bj_col:
-    merged[merged_bj_col] = merged[merged_bj_col].map(normalize_bj_name)
+if IS_KRW:
+    # 종류가 비어 있는 원화 후원은 모든 표·정산시트에서 같은 '기타'로 집계한다.
+    merged["후원종류"] = merged["후원종류"].fillna("").astype(str).str.strip().replace("", "기타")
 
 
 # ==================================================
@@ -234,12 +233,7 @@ def extract_prefix_from_filename(files):
     return None
 
 def extract_earliest_date_prefix(df):
-    col_time = next((c for c in df.columns if "후원" in c and "시간" in c), None)
-    if not col_time:
-        return None
-    tmp = df[[col_time]].copy()
-    tmp[col_time] = pd.to_datetime(tmp[col_time], errors="coerce")
-    min_dt = tmp[col_time].min()
+    min_dt = df["후원시간"].min()
     if pd.isna(min_dt):
         return None
     return min_dt.strftime("%m.%d")
@@ -253,68 +247,93 @@ else:
 
 
 # ==================================================
-# 🧠 하트 구분 / 아이디-닉네임 분리
+# ⚙️ 정산 비율 설정 (% 단위로 입력 → 엑셀 입력칸에도 그대로 들어감)
 # ==================================================
-def classify_heart_type(user_id: str) -> str:
-    s = str(user_id)
-    if "@ka" in s:
-        return "일반"
-    if "@" in s:
-        return "제휴"
-    return "일반"
-
-def split_id_nickname(text):
-    text = str(text)
-    if "(" in text and ")" in text:
-        id_part, nick_part = text.split("(", 1)
-        nick_part = nick_part.rstrip(")")
+with st.expander("정산 비율 설정 (%)", expanded=True):
+    if IS_KRW:
+        st.caption(
+            "원화 후원 파일: 투네이션·펀네이션은 수수료를 빼고, 계좌후원은 금액에 포함된 부가세를 뺀 금액이 "
+            "정산 기준액이 됩니다. 정산금 = 정산 기준액 × 정산비율, 협력지원금 = 정산 기준액 × 협력지원율"
+        )
     else:
-        id_part = text
-        nick_part = ""
-    return id_part.strip(), nick_part.strip()
+        st.caption("팬더티비 하트 파일: 정산금 = 하트 × 100원 × 정산비율, 협력지원금 = 일반하트 × 100원 × 협력지원율")
+    rate_cols = st.columns(2)
+    with rate_cols[0]:
+        settle_pct = st.number_input("정산비율 (%)", min_value=0.0, max_value=100.0, value=45.0, step=0.5, key="rate_settle")
+    with rate_cols[1]:
+        support_pct = st.number_input("협력지원율 (%)", min_value=0.0, max_value=100.0, value=5.0, step=0.5, key="rate_support")
+    if IS_KRW:
+        fee_cols = st.columns(3)
+        with fee_cols[0]:
+            toonation_fee_pct = st.number_input("투네이션 수수료 (%)", min_value=0.0, max_value=100.0, value=0.0, step=0.5, key="fee_toonation")
+        with fee_cols[1]:
+            funnation_fee_pct = st.number_input("펀네이션 수수료 (%)", min_value=0.0, max_value=100.0, value=0.0, step=0.5, key="fee_funnation")
+        with fee_cols[2]:
+            account_vat_pct = st.number_input("계좌후원 부가세 (%)", min_value=0.0, max_value=100.0, value=10.0, step=0.5, key="vat_account")
+    else:
+        toonation_fee_pct = funnation_fee_pct = account_vat_pct = 0.0
+
+RATES = {
+    "정산비율": settle_pct / 100,
+    "협력지원율": support_pct / 100,
+    "투네이션수수료": toonation_fee_pct / 100,
+    "펀네이션수수료": funnation_fee_pct / 100,
+    "계좌후원부가세": account_vat_pct / 100,
+}
 
 
 # ==================================================
-# 📊 웹 요약표 (참여BJ별 일반/제휴/총합)
+# 📊 웹 요약표 (참여BJ별 일반/제휴/총합 · 원화는 후원종류별)
 # ==================================================
+def krw_type_columns(df):
+    present = [t for t in df["후원종류"].dropna().unique() if t]
+    return KRW_DONATION_TYPES + sorted(t for t in present if t not in KRW_DONATION_TYPES)
+
+
+def split_sums(df, keys, split_col, value_cols):
+    """keys별로 value_cols(일반/제휴 또는 후원종류) 합계를 [(키 튜플, [값...], 총합)]으로 돌려준다.
+    종류 이름이 '날짜'·'총합' 같은 열 이름과 같아도 섞이지 않도록 DataFrame 열로 풀지 않는다."""
+    s = df.groupby([*keys, split_col])["후원하트"].sum().unstack(fill_value=0)
+    rows = []
+    for key, r in s.iterrows():
+        key = key if isinstance(key, tuple) else (key,)
+        values = [int(r[c]) if c in s.columns else 0 for c in value_cols]
+        rows.append((key, values, sum(values)))
+    return rows
+
+
+def display_column_names(value_cols, reserved):
+    # 화면·엑셀 머리글이 서로, 그리고 고정 열(reserved)과 겹치지 않게 만든다.
+    used = set(reserved)
+    names = []
+    for c in value_cols:
+        name = f"{c}(종류)" if c in used else c
+        n = 2
+        while name in used:
+            name = f"{c}(종류{n})"
+            n += 1
+        used.add(name)
+        names.append(name)
+    return names
+
+
 try:
     tmp = merged.copy()
+    split_col = "후원종류" if IS_KRW else "구분"
+    value_cols = krw_type_columns(tmp) if IS_KRW else ["일반", "제휴"]
 
-    col_id = next((c for c in tmp.columns if "후원" in c and "아이디" in c), None)
-    col_heart = next((c for c in tmp.columns if "후원" in c and "하트" in c), None)
-    col_bj = next((c for c in tmp.columns if "참여" in c and "BJ" in c), None)
+    shown_cols = display_column_names(value_cols, {"참여BJ", "총합"})
+    pivot = pd.DataFrame(
+        [[key[0], *values, total] for key, values, total in split_sums(tmp, ["참여BJ"], split_col, value_cols)],
+        columns=["참여BJ", *shown_cols, "총합"],
+    ).sort_values("총합", ascending=False)
 
-    if not (col_id and col_heart and col_bj):
-        st.warning("요약표: 필수 컬럼(후원아이디/후원하트/참여BJ)을 찾지 못했습니다.")
-    else:
-        tmp[col_heart] = pd.to_numeric(tmp[col_heart], errors="coerce").fillna(0)
-        tmp.loc[tmp[col_heart] < 0, col_heart] = 0
+    # 화면용 콤마(문자열) — 엑셀은 number_format으로 처리하니까 여기만 문자열로 OK
+    for c in [*shown_cols, "총합"]:
+        pivot[c] = pivot[c].apply(lambda x: f"{int(x):,}")
 
-        tmp["후원아이디"] = tmp[col_id].astype(str).str.replace(r"\(.*\)", "", regex=True).str.strip()
-        tmp["구분"] = tmp["후원아이디"].apply(classify_heart_type)
-
-        pivot = (
-            tmp.groupby([col_bj, "구분"])[col_heart]
-            .sum()
-            .unstack(fill_value=0)
-            .reset_index()
-        )
-
-        if "일반" not in pivot.columns:
-            pivot["일반"] = 0
-        if "제휴" not in pivot.columns:
-            pivot["제휴"] = 0
-
-        pivot["총합"] = pivot["일반"] + pivot["제휴"]
-        pivot = pivot.rename(columns={col_bj: "참여BJ"})
-        pivot = pivot[["참여BJ", "일반", "제휴", "총합"]].sort_values("총합", ascending=False)
-
-        # 화면용 콤마(문자열) — 엑셀은 number_format으로 처리하니까 여기만 문자열로 OK
-        for c in ["일반", "제휴", "총합"]:
-            pivot[c] = pivot[c].apply(lambda x: f"{int(x):,}")
-
-        st.subheader("요약_참여BJ_총계")
-        st.dataframe(pivot.reset_index(drop=True), hide_index=True, use_container_width=True)
+    st.subheader("요약_참여BJ_총계 (원)" if IS_KRW else "요약_참여BJ_총계")
+    st.dataframe(pivot.reset_index(drop=True), hide_index=True, use_container_width=True)
 
 except Exception as e:
     st.warning(f"요약표 생성 중 오류: {e}")
@@ -329,40 +348,71 @@ if not result:
     st.error("집계 결과가 없습니다.")
     st.stop()
 
-def make_excel(df: pd.DataFrame, bj_name: str, detail_df=None) -> BytesIO:
+def display_time(value):
+    # 원화 후원 파일의 밀리초는 내역서에 보여주지 않는다.
+    if hasattr(value, "microsecond") and value.microsecond:
+        return value.replace(microsecond=0)
+    return value
+
+
+def safe_sheet_title(name, used: set) -> str:
+    # 엑셀 시트 이름에 쓸 수 없는 문자([ ] : * ? / \)는 _로 바꾸고 31자 이내·중복 없이 만든다.
+    base = "".join("_" if c in "[]:*?/\\" else c for c in str(name)).strip() or "Sheet"
+    base = base[:31]
+    title, n = base, 2
+    while title in used:
+        suffix = f"_{n}"
+        title = base[:31 - len(suffix)] + suffix
+        n += 1
+    used.add(title)
+    return title
+
+
+def make_excel(df: pd.DataFrame, bj_name: str, detail_df=None, include_type: bool = False) -> BytesIO:
     wb = Workbook()
     ws = wb.active
     ws.title = "정산표"
 
     # 상단 합계
     total = int(pd.to_numeric(df["후원하트"], errors="coerce").fillna(0).sum())
-    ws["A1"] = ""
-    ws["B1"] = bj_name
-    total_cell = ws["C1"]
+    if IS_KRW:
+        # 원화 후원: BJ에게는 닉네임 / 후원금액만 보여준다.
+        ws["A1"] = bj_name
+        total_cell = ws["B1"]
+        ws.append(["닉네임", "후원금액"])
+    else:
+        ws["A1"] = ""
+        ws["B1"] = bj_name
+        total_cell = ws["C1"]
+        ws.append(["후원아이디", "닉네임", "후원하트"])
     total_cell.value = total
     total_cell.number_format = "#,##0"
-
-    # 헤더
-    ws.append(["후원아이디", "닉네임", "후원하트"])
     format_header_row(ws, header_row=2)
 
     # 데이터
     for _, r in df.iterrows():
         row = ws.max_row + 1
-        ws.cell(row=row, column=1, value=str(r.get("아이디", "")))
-        ws.cell(row=row, column=2, value=str(r.get("닉네임", "")))
-
         heart = pd.to_numeric(r.get("후원하트", 0), errors="coerce")
         heart = 0 if pd.isna(heart) else int(heart)
         heart = max(heart, 0)
 
-        cell = ws.cell(row=row, column=3, value=heart)
+        if IS_KRW:
+            ws.cell(row=row, column=1, value=str(r.get("닉네임", "")))
+            cell = ws.cell(row=row, column=2, value=heart)
+        else:
+            ws.cell(row=row, column=1, value=str(r.get("아이디", "")))
+            ws.cell(row=row, column=2, value=str(r.get("닉네임", "")))
+            cell = ws.cell(row=row, column=3, value=heart)
         cell.number_format = "#,##0"
 
     # 기본 폭(너무 좁아지는 것 방지) + 자동 보정
-    ws.column_dimensions["A"].width = 26
-    ws.column_dimensions["B"].width = 22
-    ws.column_dimensions["C"].width = 16
+    if IS_KRW:
+        ws.column_dimensions["A"].width = 26
+        ws.column_dimensions["B"].width = 16
+    else:
+        ws.column_dimensions["A"].width = 26
+        ws.column_dimensions["B"].width = 22
+        ws.column_dimensions["C"].width = 16
     auto_width(ws, min_w=18, max_w=45, pad=4)
     apply_border(ws)
 
@@ -373,14 +423,18 @@ def make_excel(df: pd.DataFrame, bj_name: str, detail_df=None) -> BytesIO:
 
         detail_ws = wb.create_sheet("상세내역")
 
-        detail_ws.append([
-            "날짜",
-            "시간",
-            "아이디",
-            "닉네임",
-            "하트",
-            "구분"
-        ])
+        if IS_KRW:
+            # (헤더, 표준 열) 목록. 후원종류는 정산용에만 넣고 BJ용에는 넣지 않는다.
+            columns = [("날짜", "날짜"), ("시간", "시간"), ("닉네임", "닉네임"), ("후원금액", "후원하트")]
+            if include_type:
+                columns.append(("후원종류", "후원종류"))
+        else:
+            columns = [
+                ("날짜", "날짜"), ("시간", "시간"), ("아이디", "아이디"),
+                ("닉네임", "닉네임"), ("하트", "후원하트"), ("구분", "구분"),
+            ]
+
+        detail_ws.append([header for header, _ in columns])
 
         format_header_row(detail_ws, 1)
 
@@ -393,50 +447,18 @@ def make_excel(df: pd.DataFrame, bj_name: str, detail_df=None) -> BytesIO:
 
             row = detail_ws.max_row + 1
 
-            detail_ws.cell(
-                row=row,
-                column=1,
-                value=r.get("날짜")
-            )
+            for col, (_, key) in enumerate(columns, start=1):
+                if key == "후원하트":
+                    cell = detail_ws.cell(row=row, column=col, value=int(r.get("후원하트", 0)))
+                    cell.number_format = "#,##0"
+                elif key == "시간":
+                    detail_ws.cell(row=row, column=col, value=display_time(r.get("시간")))
+                else:
+                    detail_ws.cell(row=row, column=col, value=r.get(key))
 
-            detail_ws.cell(
-                row=row,
-                column=2,
-                value=r.get("시간")
-            )
-
-            detail_ws.cell(
-                row=row,
-                column=3,
-                value=r.get("아이디")
-            )
-
-            detail_ws.cell(
-                row=row,
-                column=4,
-                value=r.get("닉네임")
-            )
-
-            heart_cell = detail_ws.cell(
-                row=row,
-                column=5,
-                value=int(r.get("후원하트", 0))
-            )
-
-            heart_cell.number_format = "#,##0"
-
-            detail_ws.cell(
-                row=row,
-                column=6,
-                value=r.get("구분")
-            )
-
-        detail_ws.column_dimensions["A"].width = 20
-        detail_ws.column_dimensions["B"].width = 18
-        detail_ws.column_dimensions["C"].width = 32
-        detail_ws.column_dimensions["D"].width = 26
-        detail_ws.column_dimensions["E"].width = 14
-        detail_ws.column_dimensions["F"].width = 12
+        widths = {"날짜": 20, "시간": 18, "아이디": 32, "닉네임": 26, "하트": 14, "후원금액": 14, "구분": 12, "후원종류": 12}
+        for col, (header, _) in enumerate(columns, start=1):
+            detail_ws.column_dimensions[detail_ws.cell(row=1, column=col).column_letter].width = widths[header]
 
         auto_width(detail_ws, min_w=18, max_w=45, pad=4)
 
@@ -451,160 +473,98 @@ def make_excel(df: pd.DataFrame, bj_name: str, detail_df=None) -> BytesIO:
 # ==================================================
 # 📦 총합산 파일 (여러 파일 업로드 시) - 3시트 구조
 # 1) 일자별집계  2) 총합  3) BJ별 상세(각 BJ 1시트)
+# 원화 후원은 일반/제휴 대신 후원종류(투네이션/펀네이션/계좌후원)별로 나눈다.
 # ==================================================
 def make_total_excel(df: pd.DataFrame) -> BytesIO | None:
     wb = Workbook()
     wb.remove(wb.active)
 
     tmp = df.copy()
-
-    col_time = next((c for c in tmp.columns if "후원" in c and "시간" in c), None)
-    col_idnick = next((c for c in tmp.columns if "후원" in c and "아이디" in c), None)
-    col_heart = next((c for c in tmp.columns if "후원" in c and "하트" in c), None)
-    col_bj = next((c for c in tmp.columns if "참여" in c and "BJ" in c), None)
-
-    if not all([col_time, col_idnick, col_heart, col_bj]):
+    if tmp["후원시간"].isna().all():
         return None
 
-    tmp[col_time] = (
-        tmp[col_time]
-        .astype(str)
-        .str.replace(r"[./]", "-", regex=True)
-        .str.replace("T", " ")
-        .str.strip()
-    )
+    split_col = "후원종류" if IS_KRW else "구분"
+    value_cols = krw_type_columns(tmp) if IS_KRW else ["일반", "제휴"]
+    amount_header = "후원금액" if IS_KRW else "하트"
 
-    tmp[col_time] = pd.to_datetime(
-        tmp[col_time],
-        errors="coerce",
-        format="mixed"
-    )
-
-    tmp["날짜"] = tmp[col_time].dt.date
-    tmp["시간"] = tmp[col_time].dt.time
-
-    tmp[col_heart] = pd.to_numeric(tmp[col_heart], errors="coerce").fillna(0)
-    tmp.loc[tmp[col_heart] < 0, col_heart] = 0
-    tmp["날짜"] = tmp[col_time].dt.date
-    tmp["시간"] = tmp[col_time].dt.time
-    tmp[col_heart] = pd.to_numeric(tmp[col_heart], errors="coerce").fillna(0)
-    tmp.loc[tmp[col_heart] < 0, col_heart] = 0
-
-    tmp[["아이디", "닉네임"]] = tmp[col_idnick].apply(lambda x: pd.Series(split_id_nickname(x)))
-    tmp["구분"] = tmp["아이디"].apply(classify_heart_type)
+    tmp["날짜"] = tmp["후원시간"].dt.date
+    tmp["시간"] = tmp["후원시간"].dt.time.map(display_time)
 
     # 1) 일자별집계
     ws1 = wb.create_sheet("일자별집계")
-    ws1.append(["날짜", "BJ", "일반", "제휴", "총합"])
+    ws1.append(["날짜", "BJ", *display_column_names(value_cols, {"날짜", "BJ", "총합"}), "총합"])
     format_header_row(ws1, 1)
 
-    s1 = (
-        tmp.groupby(["날짜", col_bj, "구분"])[col_heart]
-        .sum()
-        .unstack(fill_value=0)
-        .reset_index()
-    )
-    if "일반" not in s1.columns: s1["일반"] = 0
-    if "제휴" not in s1.columns: s1["제휴"] = 0
-    s1["총합"] = s1["일반"] + s1["제휴"]
-
-    for _, r in s1.iterrows():
+    for (day, bj), values, total in split_sums(tmp, ["날짜", "참여BJ"], split_col, value_cols):
         row = ws1.max_row + 1
-        ws1.cell(row=row, column=1, value=r["날짜"])
-        ws1.cell(row=row, column=2, value=r[col_bj])
-
-        c1 = ws1.cell(row=row, column=3, value=int(r["일반"]))
-        c2 = ws1.cell(row=row, column=4, value=int(r["제휴"]))
-        c3 = ws1.cell(row=row, column=5, value=int(r["총합"]))
-        for c in (c1, c2, c3):
-            c.number_format = "#,##0"
+        ws1.cell(row=row, column=1, value=day)
+        ws1.cell(row=row, column=2, value=bj)
+        for offset, v in enumerate([*values, total], start=3):
+            ws1.cell(row=row, column=offset, value=v).number_format = "#,##0"
 
     ws1.column_dimensions["A"].width = 20
     ws1.column_dimensions["B"].width = 28
-    ws1.column_dimensions["C"].width = 16
-    ws1.column_dimensions["D"].width = 16
-    ws1.column_dimensions["E"].width = 16
+    for offset in range(3, len(value_cols) + 4):
+        ws1.column_dimensions[ws1.cell(row=1, column=offset).column_letter].width = 16
     auto_width(ws1, min_w=18, max_w=45, pad=4)
     apply_border(ws1)
 
     # 2) 총합
     ws2 = wb.create_sheet("총합")
-    ws2.append(["BJ", "일반", "제휴", "총합"])
+    ws2.append(["BJ", *display_column_names(value_cols, {"BJ", "총합"}), "총합"])
     format_header_row(ws2, 1)
 
-    s2 = (
-        tmp.groupby([col_bj, "구분"])[col_heart]
-        .sum()
-        .unstack(fill_value=0)
-        .reset_index()
-    )
-    if "일반" not in s2.columns: s2["일반"] = 0
-    if "제휴" not in s2.columns: s2["제휴"] = 0
-    s2["총합"] = s2["일반"] + s2["제휴"]
-
-    for _, r in s2.iterrows():
+    for (bj,), values, total in split_sums(tmp, ["참여BJ"], split_col, value_cols):
         row = ws2.max_row + 1
-        ws2.cell(row=row, column=1, value=r[col_bj])
-
-        c1 = ws2.cell(row=row, column=2, value=int(r["일반"]))
-        c2 = ws2.cell(row=row, column=3, value=int(r["제휴"]))
-        c3 = ws2.cell(row=row, column=4, value=int(r["총합"]))
-        for c in (c1, c2, c3):
-            c.number_format = "#,##0"
+        ws2.cell(row=row, column=1, value=bj)
+        for offset, v in enumerate([*values, total], start=2):
+            ws2.cell(row=row, column=offset, value=v).number_format = "#,##0"
 
     ws2.column_dimensions["A"].width = 28
-    ws2.column_dimensions["B"].width = 16
-    ws2.column_dimensions["C"].width = 16
-    ws2.column_dimensions["D"].width = 16
+    for offset in range(2, len(value_cols) + 3):
+        ws2.column_dimensions[ws2.cell(row=1, column=offset).column_letter].width = 16
     auto_width(ws2, min_w=18, max_w=45, pad=4)
     apply_border(ws2)
 
     # 3) BJ별 상세 (각 BJ 1시트)
-    for bj in tmp[col_bj].dropna().unique():
-        ws = wb.create_sheet(str(bj))
-        sub = tmp[tmp[col_bj] == bj].copy()
-
-        normal_sum = int(sub[sub["구분"] == "일반"][col_heart].sum())
-        partner_sum = int(sub[sub["구분"] == "제휴"][col_heart].sum())
-        total_sum = normal_sum + partner_sum
+    used_titles = set(wb.sheetnames)
+    for bj in tmp["참여BJ"].dropna().unique():
+        ws = wb.create_sheet(safe_sheet_title(bj, used_titles))
+        sub = tmp[tmp["참여BJ"] == bj].copy()
 
         # 상단 한 줄 표시(일렬)
-        ws["A1"] = "총하트"
-        ws["B1"] = total_sum
-        ws["C1"] = "일반하트"
-        ws["D1"] = normal_sum
-        ws["E1"] = "제휴하트"
-        ws["F1"] = partner_sum
-        ws["B1"].number_format = "#,##0"
-        ws["D1"].number_format = "#,##0"
-        ws["F1"].number_format = "#,##0"
+        sums = [int(sub.loc[sub[split_col] == c, "후원하트"].sum()) for c in value_cols]
+        if IS_KRW:
+            top = [("총후원금액", sum(sums))] + list(zip(value_cols, sums))
+            detail_headers = ["날짜", "시간", "닉네임", amount_header, "후원종류"]
+            detail_keys = ["날짜", "시간", "닉네임", "후원하트", "후원종류"]
+        else:
+            top = [("총하트", sum(sums)), ("일반하트", sums[0]), ("제휴하트", sums[1])]
+            detail_headers = ["날짜", "시간", "아이디", "닉네임", amount_header, "구분"]
+            detail_keys = ["날짜", "시간", "아이디", "닉네임", "후원하트", "구분"]
+
+        for idx, (label, value) in enumerate(top):
+            ws.cell(row=1, column=idx * 2 + 1, value=label)
+            ws.cell(row=1, column=idx * 2 + 2, value=value).number_format = "#,##0"
 
         ws.append([])
-        ws.append(["날짜", "시간", "아이디", "닉네임", "하트", "구분"])
+        ws.append(detail_headers)
         format_header_row(ws, header_row=3)
 
         # 정렬(원하면 여기서 날짜/시간 정렬)
-        sub = sub.sort_values(by=[col_time], ascending=True)
+        sub = sub.sort_values(by=["후원시간"], ascending=True)
 
         for _, r in sub.iterrows():
             row = ws.max_row + 1
-            ws.cell(row=row, column=1, value=r["날짜"])
-            ws.cell(row=row, column=2, value=r["시간"])
-            ws.cell(row=row, column=3, value=r["아이디"])
-            ws.cell(row=row, column=4, value=r["닉네임"])
+            for col, key in enumerate(detail_keys, start=1):
+                if key == "후원하트":
+                    ws.cell(row=row, column=col, value=int(r[key])).number_format = "#,##0"
+                else:
+                    ws.cell(row=row, column=col, value=r[key])
 
-            h = int(r[col_heart])
-            hc = ws.cell(row=row, column=5, value=h)
-            hc.number_format = "#,##0"
-
-            ws.cell(row=row, column=6, value=r["구분"])
-
-        ws.column_dimensions["A"].width = 20
-        ws.column_dimensions["B"].width = 18
-        ws.column_dimensions["C"].width = 32
-        ws.column_dimensions["D"].width = 26
-        ws.column_dimensions["E"].width = 14
-        ws.column_dimensions["F"].width = 12
+        widths = {"날짜": 20, "시간": 18, "아이디": 32, "닉네임": 26, amount_header: 14, "구분": 12, "후원종류": 12}
+        for col, header in enumerate(detail_headers, start=1):
+            ws.column_dimensions[ws.cell(row=3, column=col).column_letter].width = widths[header]
         auto_width(ws, min_w=18, max_w=45, pad=4)
         apply_border(ws)
 
@@ -672,11 +632,48 @@ def _save_workbook_with_cached_values(wb: Workbook, cached_values: dict[str, int
     return patched
 
 
+def _num(value):
+    # 엑셀 캐시값용: 부동소수 오차를 정리하고 정수면 int로 둔다.
+    value = round(float(value), 9)
+    return int(value) if value.is_integer() else value
+
+
+def _assign_rounds(detail_df: pd.DataFrame, all_round_labels: list[str] | None):
+    sorted_detail = detail_df.copy() if detail_df is not None else pd.DataFrame()
+    if not sorted_detail.empty:
+        sorted_detail = sorted_detail.sort_values(by=["날짜", "시간"], ascending=True)
+    if "회차" in sorted_detail.columns and sorted_detail["회차"].notna().any():
+        sorted_detail["회차"] = sorted_detail["회차"].fillna("").astype(str)
+        round_names = all_round_labels or sorted(
+            [x for x in sorted_detail["회차"].dropna().unique() if x],
+            key=lambda x: int(re.search(r"\d+", str(x)).group()) if re.search(r"\d+", str(x)) else 9999
+        )
+    else:
+        sorted_detail["정산일자"] = sorted_detail.apply(
+            lambda r: _business_date(r.get("날짜"), r.get("시간")),
+            axis=1
+        ) if not sorted_detail.empty else []
+        round_dates = [
+            d for d in sorted(sorted_detail["정산일자"].dropna().unique())
+        ] if not sorted_detail.empty else []
+        round_map = {d: f"{idx}회차" for idx, d in enumerate(round_dates, start=1)}
+        if not sorted_detail.empty:
+            sorted_detail["회차"] = sorted_detail["정산일자"].map(round_map).fillna("")
+        round_names = [round_map[d] for d in round_dates]
+    return sorted_detail, round_names
+
+
 def make_standard_settlement_excel(
     detail_df: pd.DataFrame,
     bj_name: str,
     all_round_labels: list[str] | None = None
 ) -> BytesIO:
+    if IS_KRW:
+        return make_krw_settlement_excel(detail_df, bj_name, all_round_labels)
+
+    settle_rate = RATES["정산비율"]
+    support_rate = RATES["협력지원율"]
+
     wb = Workbook()
     ws = wb.active
     ws.title = "정산시트"
@@ -713,40 +710,20 @@ def make_standard_settlement_excel(
     ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
 
     ws["I3"] = "정산비율"
-    ws["J3"] = 0.45
+    ws["J3"] = settle_rate
     ws["I4"] = "하트단가"
     ws["J4"] = "=$J$3*100"
     ws["I5"] = "협력지원율"
-    ws["J5"] = 0.05
+    ws["J5"] = support_rate
     for cell in ("I3", "I4", "I5"):
         style_input(ws[cell])
     for cell in ("J3", "J4", "J5"):
         style_input(ws[cell])
-    ws["J3"].number_format = "0%"
+    ws["J3"].number_format = pct_format(settle_rate)
     ws["J4"].number_format = "#,##0"
-    ws["J5"].number_format = "0%"
+    ws["J5"].number_format = pct_format(support_rate)
 
-    sorted_detail = detail_df.copy() if detail_df is not None else pd.DataFrame()
-    if not sorted_detail.empty:
-        sorted_detail = sorted_detail.sort_values(by=["날짜", "시간"], ascending=True)
-    if "회차" in sorted_detail.columns and sorted_detail["회차"].notna().any():
-        sorted_detail["회차"] = sorted_detail["회차"].fillna("").astype(str)
-        round_names = all_round_labels or sorted(
-            [x for x in sorted_detail["회차"].dropna().unique() if x],
-            key=lambda x: int(re.search(r"\d+", str(x)).group()) if re.search(r"\d+", str(x)) else 9999
-        )
-    else:
-        sorted_detail["정산일자"] = sorted_detail.apply(
-            lambda r: _business_date(r.get("날짜"), r.get("시간")),
-            axis=1
-        ) if not sorted_detail.empty else []
-        round_dates = [
-            d for d in sorted(sorted_detail["정산일자"].dropna().unique())
-        ] if not sorted_detail.empty else []
-        round_map = {d: f"{idx}회차" for idx, d in enumerate(round_dates, start=1)}
-        if not sorted_detail.empty:
-            sorted_detail["회차"] = sorted_detail["정산일자"].map(round_map).fillna("")
-        round_names = [round_map[d] for d in round_dates]
+    sorted_detail, round_names = _assign_rounds(detail_df, all_round_labels)
 
     heart_by_round = {}
     normal_total = 0
@@ -760,7 +737,8 @@ def make_standard_settlement_excel(
         normal_total = int(sorted_detail.loc[sorted_detail["구분"] == "일반", "후원하트"].sum())
         partner_total = int(sorted_detail.loc[sorted_detail["구분"] == "제휴", "후원하트"].sum())
 
-    cached_values = {"J4": 45}
+    heart_price = HEART_UNIT_PRICE * settle_rate  # 하트 1개 정산금 = 100원 × 정산비율
+    cached_values = {"J4": _num(heart_price)}
 
     headers = [" ", "수량", "정산금", "상/벌금", "헤메", "총 정산금", "비고"]
     for col, value in enumerate(headers, start=1):
@@ -774,7 +752,7 @@ def make_standard_settlement_excel(
         row = first_round_row + offset
         round_name = round_names[offset] if round_names else "1회차"
         round_heart = int(heart_by_round.get(round_name, 0))
-        round_amount = int(round_heart * 45)
+        round_amount = _num(round_heart * heart_price)
         ws.cell(row=row, column=1, value=round_name)
         ws.cell(row=row, column=2, value=f'=SUMIF(\'후원내역\'!A:A,\'정산시트\'!A{row},\'후원내역\'!F:F)')
         ws.cell(row=row, column=3, value=f"=B{row}*$J$3*100")
@@ -798,7 +776,7 @@ def make_standard_settlement_excel(
     ws.cell(row=total_row, column=5, value=f"=SUM(E{first_round_row}:E{total_row - 1})")
     ws.cell(row=total_row, column=6, value=f"=SUM(F{first_round_row}:F{total_row - 1})")
     total_heart = int(sum(heart_by_round.get(round_name, 0) for round_name in round_names))
-    total_amount = int(total_heart * 45)
+    total_amount = _num(total_heart * heart_price)
     cached_values[f"B{total_row}"] = total_heart
     cached_values[f"C{total_row}"] = total_amount
     cached_values[f"D{total_row}"] = 0
@@ -845,27 +823,16 @@ def make_standard_settlement_excel(
             ws.cell(row=row, column=col).number_format = "#,##0"
         if label == "협력지원금":
             ws.cell(row=row, column=3).number_format = "#,##0"
-        if label == "일반하트":
-            amount = int(normal_total * 45)
-            tax = int(amount * 0.1)
-            cached_values[f"C{row}"] = normal_total
+        # 캐시값은 엑셀 수식과 같은 값(절삭 없이)으로 넣는다.
+        if label in ("일반하트", "협력지원금", "제휴하트"):
+            hearts = partner_total if label == "제휴하트" else normal_total
+            rate = support_rate if label == "협력지원금" else settle_rate
+            amount = _num(hearts * HEART_UNIT_PRICE * rate)
+            tax = _num(amount * 0.1)
+            cached_values[f"C{row}"] = hearts
             cached_values[f"D{row}"] = amount
             cached_values[f"E{row}"] = tax
-            cached_values[f"F{row}"] = amount + tax
-        elif label == "협력지원금":
-            amount = int(normal_total * 5)
-            tax = int(amount * 0.1)
-            cached_values[f"C{row}"] = normal_total
-            cached_values[f"D{row}"] = amount
-            cached_values[f"E{row}"] = tax
-            cached_values[f"F{row}"] = amount + tax
-        elif label == "제휴하트":
-            amount = int(partner_total * 45)
-            tax = int(amount * 0.1)
-            cached_values[f"C{row}"] = partner_total
-            cached_values[f"D{row}"] = amount
-            cached_values[f"E{row}"] = tax
-            cached_values[f"F{row}"] = amount + tax
+            cached_values[f"F{row}"] = _num(amount + tax)
         else:
             cached_values[f"E{row}"] = 0
             cached_values[f"F{row}"] = 0
@@ -876,14 +843,18 @@ def make_standard_settlement_excel(
     ws.cell(row=final_row, column=4, value=f"=SUM(D{summary_header_row + 1}:D{final_row - 1})")
     ws.cell(row=final_row, column=5, value=f"=SUM(E{summary_header_row + 1}:E{final_row - 1})")
     ws.cell(row=final_row, column=6, value=f"=SUM(F{summary_header_row + 1}:F{final_row - 1})")
-    support_amount = int(normal_total * 5)
     final_heart = normal_total + partner_total
-    final_supply = int((normal_total * 45) + support_amount + (partner_total * 45))
-    final_tax = int(final_supply * 0.1)
+    supplies = [
+        _num(normal_total * HEART_UNIT_PRICE * settle_rate),
+        _num(normal_total * HEART_UNIT_PRICE * support_rate),
+        _num(partner_total * HEART_UNIT_PRICE * settle_rate),
+    ]
+    final_supply = _num(sum(supplies))
+    final_tax = _num(sum(_num(x * 0.1) for x in supplies))
     cached_values[f"C{final_row}"] = final_heart
     cached_values[f"D{final_row}"] = final_supply
     cached_values[f"E{final_row}"] = final_tax
-    cached_values[f"F{final_row}"] = final_supply + final_tax
+    cached_values[f"F{final_row}"] = _num(final_supply + final_tax)
     for col in range(1, 8):
         cell = ws.cell(row=final_row, column=col)
         cell.font = bold_font
@@ -928,6 +899,292 @@ def make_standard_settlement_excel(
     return _save_workbook_with_cached_values(wb, cached_values)
 
 
+def excel_criteria(text: str) -> str:
+    # SUMIF 조건에서 * ? ~ 는 와일드카드라 ~로 막고, 따옴표는 두 번 써서 수식이 깨지지 않게 한다.
+    escaped = "".join("~" + c if c in "*?~" else c for c in str(text))
+    return escaped.replace('"', '""')
+
+
+def pct_format(rate: float) -> str:
+    return "0%" if round(rate * 100, 6).is_integer() else "0.0#%"
+
+
+def make_krw_settlement_excel(
+    detail_df: pd.DataFrame,
+    bj_name: str,
+    all_round_labels: list[str] | None = None
+) -> BytesIO:
+    """원화 후원용 정산시트.
+    정산 기준액 = 투네이션×(1-수수료) + 펀네이션×(1-수수료) + 계좌후원÷(1+부가세) + 기타
+    정산금 = 기준액 × 정산비율, 협력지원금 = 기준액 × 협력지원율 (비율은 J3~J7 입력칸에서 변경)"""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "정산시트"
+    log_ws = wb.create_sheet("후원내역")
+
+    try:
+        wb.calculation.fullCalcOnLoad = True
+        wb.calculation.forceFullCalc = True
+    except Exception:
+        pass
+
+    header_fill = PatternFill("solid", fgColor="666666")
+    yellow_fill = PatternFill("solid", fgColor="FFF2CC")
+    input_fill = PatternFill("solid", fgColor="D9EAD3")
+    title_fill = PatternFill("solid", fgColor="D9EAF7")
+    header_font = Font(name="맑은 고딕", bold=True, color="FFFFFF")
+    bold_font = Font(name="맑은 고딕", bold=True)
+    normal_font = Font(name="맑은 고딕", size=11)
+
+    def style_header(cell):
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    def style_input(cell):
+        cell.fill = input_fill
+        cell.font = bold_font
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    ws.merge_cells("A1:G2")
+    ws["A1"] = f"{bj_name} 정산표"
+    ws["A1"].font = Font(name="맑은 고딕", size=14, bold=True)
+    ws["A1"].fill = title_fill
+    ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
+
+    # 비율 입력칸 (엑셀에서 바꾸면 전체가 다시 계산된다)
+    inputs = [
+        ("I3", "정산비율", "J3", RATES["정산비율"]),
+        ("I4", "협력지원율", "J4", RATES["협력지원율"]),
+        ("I5", "투네이션 수수료", "J5", RATES["투네이션수수료"]),
+        ("I6", "펀네이션 수수료", "J6", RATES["펀네이션수수료"]),
+        ("I7", "계좌후원 부가세", "J7", RATES["계좌후원부가세"]),
+    ]
+    for label_ref, label, value_ref, value in inputs:
+        ws[label_ref] = label
+        ws[value_ref] = value
+        style_input(ws[label_ref])
+        style_input(ws[value_ref])
+        ws[value_ref].number_format = pct_format(value)
+    ws["I8"] = "※ 계좌후원은 부가세 포함 금액이라 ÷(1+부가세)로 제외"
+    ws["I8"].font = Font(name="맑은 고딕", size=9, color="666666")
+
+    settle_rate = RATES["정산비율"]
+    support_rate = RATES["협력지원율"]
+    deduct = {
+        "투네이션": lambda x: x * (1 - RATES["투네이션수수료"]),
+        "펀네이션": lambda x: x * (1 - RATES["펀네이션수수료"]),
+        "계좌후원": lambda x: x / (1 + RATES["계좌후원부가세"]),
+    }
+
+    def base_amount(amount_by_type: dict) -> float:
+        return sum(deduct.get(t, lambda x: x)(v) for t, v in amount_by_type.items())
+
+    sorted_detail, round_names = _assign_rounds(detail_df, all_round_labels)
+
+    type_names = krw_type_columns(sorted_detail) if not sorted_detail.empty else list(KRW_DONATION_TYPES)
+    amount_by_round_type = {}
+    amount_by_type = {t: 0 for t in type_names}
+    if not sorted_detail.empty:
+        amount_by_round_type = (
+            sorted_detail.groupby(["회차", "후원종류"])["후원하트"].sum().to_dict()
+        )
+        for t, v in sorted_detail.groupby("후원종류")["후원하트"].sum().items():
+            amount_by_type[t] = int(v)
+
+    cached_values = {}
+
+    headers = [" ", "후원금액", "정산금", "상/벌금", "헤메", "총 정산금", "비고"]
+    for col, value in enumerate(headers, start=1):
+        cell = ws.cell(row=3, column=col, value=value)
+        style_header(cell)
+    ws["C3"] = '=TEXT($J$3,"0%")&" 정산금"'
+
+    log_ref = "'후원내역'"
+    first_round_row = 4
+    round_count = max(len(round_names), 1)
+    for offset in range(round_count):
+        row = first_round_row + offset
+        round_name = round_names[offset] if round_names else "1회차"
+
+        def sumifs(donation_type):
+            return f'SUMIFS({log_ref}!E:E,{log_ref}!A:A,$A{row},{log_ref}!F:F,"{excel_criteria(donation_type)}")'
+
+        ws.cell(row=row, column=1, value=round_name)
+        ws.cell(row=row, column=2, value=f"=SUMIF({log_ref}!A:A,$A{row},{log_ref}!E:E)")
+        ws.cell(
+            row=row,
+            column=3,
+            value=(
+                f"=(B{row}-{sumifs('투네이션')}*$J$5-{sumifs('펀네이션')}*$J$6"
+                f"-{sumifs('계좌후원')}*$J$7/(1+$J$7))*$J$3"
+            ),
+        )
+        ws.cell(row=row, column=6, value=f"=C{row}+D{row}+E{row}")
+        ws.cell(row=row, column=7, value="")
+
+        round_types = {t: v for (r, t), v in amount_by_round_type.items() if r == round_name}
+        round_amount = int(sum(round_types.values()))
+        round_settle = _num(base_amount(round_types) * settle_rate)
+        cached_values[f"B{row}"] = round_amount
+        cached_values[f"C{row}"] = round_settle
+        cached_values[f"F{row}"] = round_settle
+
+        for col in range(1, 8):
+            cell = ws.cell(row=row, column=col)
+            cell.font = normal_font
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+        for col in (2, 3, 4, 5, 6):
+            ws.cell(row=row, column=col).number_format = "#,##0"
+
+    total_row = first_round_row + round_count
+    ws.cell(row=total_row, column=1, value="합계")
+    for col_letter in "BCDEF":
+        ws[f"{col_letter}{total_row}"] = f"=SUM({col_letter}{first_round_row}:{col_letter}{total_row - 1})"
+    round_rows = range(first_round_row, total_row)
+    cached_values[f"B{total_row}"] = int(sum(cached_values[f"B{r}"] for r in round_rows))
+    cached_values[f"C{total_row}"] = _num(sum(cached_values[f"C{r}"] for r in round_rows))
+    cached_values[f"D{total_row}"] = 0
+    cached_values[f"E{total_row}"] = 0
+    cached_values[f"F{total_row}"] = cached_values[f"C{total_row}"]
+    for col in range(1, 8):
+        cell = ws.cell(row=total_row, column=col)
+        cell.font = bold_font
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+    for col in (2, 3, 4, 5, 6):
+        ws.cell(row=total_row, column=col).number_format = "#,##0"
+
+    summary_header_row = total_row + 3
+    summary_headers = ["일자", "구분", "후원금액", "공급가액", "세액", "합계", "비고"]
+    for col, value in enumerate(summary_headers, start=1):
+        cell = ws.cell(row=summary_header_row, column=col, value=value)
+        style_header(cell)
+
+    # (구분, 후원금액 수식, 공급가액 수식, 비고, 캐시 후원금액, 캐시 공급가액)
+    type_supply_formula = {
+        "투네이션": ("=C{row}*(1-$J$5)*$J$3", "수수료(J5) 차감 후 정산비율"),
+        "펀네이션": ("=C{row}*(1-$J$6)*$J$3", "수수료(J6) 차감 후 정산비율"),
+        "계좌후원": ("=C{row}/(1+$J$7)*$J$3", "포함된 부가세(J7) 제외 후 정산비율"),
+    }
+    first_type_row = summary_header_row + 1
+    rows = []
+    for t in type_names:
+        supply_formula, note = type_supply_formula.get(t, ("=C{row}*$J$3", "정산비율"))
+        amount = amount_by_type.get(t, 0)
+        rows.append((
+            t,
+            f'=SUMIF({log_ref}!F:F,"{excel_criteria(t)}",{log_ref}!E:E)',
+            supply_formula,
+            note,
+            amount,
+            _num(deduct.get(t, lambda x: x)(amount) * settle_rate),
+        ))
+    last_type_row = first_type_row + len(rows) - 1
+
+    def type_row_of(t):
+        return first_type_row + type_names.index(t)
+
+    base_terms = []
+    for t in type_names:
+        r = type_row_of(t)
+        if t == "투네이션":
+            base_terms.append(f"C{r}*(1-$J$5)")
+        elif t == "펀네이션":
+            base_terms.append(f"C{r}*(1-$J$6)")
+        elif t == "계좌후원":
+            base_terms.append(f"C{r}/(1+$J$7)")
+        else:
+            base_terms.append(f"C{r}")
+    total_base = _num(base_amount(amount_by_type))
+    rows.append((
+        "협력지원금",
+        "=" + "+".join(base_terms),
+        "=C{row}*$J$4",
+        "정산 기준액 × 협력지원율(J4)",
+        total_base,
+        _num(total_base * support_rate),
+    ))
+    rows.append(("헤메", "", "", "", None, None))
+    rows.append(("상/벌금", "", "", "상벌금 합계", None, None))
+
+    for idx, (label, amount_formula, supply_formula, note, cached_amount, cached_supply) in enumerate(rows, start=1):
+        row = summary_header_row + idx
+        ws.cell(row=row, column=2, value=label)
+        ws.cell(row=row, column=2).fill = yellow_fill
+        ws.cell(row=row, column=2).alignment = Alignment(horizontal="center", vertical="center")
+        if amount_formula:
+            ws.cell(row=row, column=3, value=amount_formula)
+        if supply_formula:
+            ws.cell(row=row, column=4, value=supply_formula.format(row=row))
+        ws.cell(row=row, column=5, value=f"=D{row}*0.1")
+        ws.cell(row=row, column=6, value=f"=D{row}+E{row}")
+        ws.cell(row=row, column=7, value=note)
+        for col in range(3, 7):
+            ws.cell(row=row, column=col).number_format = "#,##0"
+        if cached_supply is not None:
+            tax = _num(cached_supply * 0.1)
+            cached_values[f"C{row}"] = cached_amount
+            cached_values[f"D{row}"] = cached_supply
+            cached_values[f"E{row}"] = tax
+            cached_values[f"F{row}"] = _num(cached_supply + tax)
+        else:
+            cached_values[f"E{row}"] = 0
+            cached_values[f"F{row}"] = 0
+
+    final_row = summary_header_row + len(rows) + 1
+    ws.cell(row=final_row, column=1, value="합계")
+    ws.cell(row=final_row, column=3, value=f"=SUM(C{first_type_row}:C{last_type_row})")
+    ws.cell(row=final_row, column=4, value=f"=SUM(D{first_type_row}:D{final_row - 1})")
+    ws.cell(row=final_row, column=5, value=f"=SUM(E{first_type_row}:E{final_row - 1})")
+    ws.cell(row=final_row, column=6, value=f"=SUM(F{first_type_row}:F{final_row - 1})")
+    summary_rows = range(first_type_row, final_row)
+    cached_values[f"C{final_row}"] = int(sum(amount_by_type.values()))
+    for col_letter in "DEF":
+        cached_values[f"{col_letter}{final_row}"] = _num(
+            sum(cached_values.get(f"{col_letter}{r}", 0) or 0 for r in summary_rows)
+        )
+    for col in range(1, 8):
+        cell = ws.cell(row=final_row, column=col)
+        cell.font = bold_font
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+    for col in range(3, 7):
+        ws.cell(row=final_row, column=col).number_format = "#,##0"
+
+    for col, width in {
+        "A": 15, "B": 14, "C": 16, "D": 16, "E": 14, "F": 16, "G": 30,
+        "I": 16, "J": 12,
+    }.items():
+        ws.column_dimensions[col].width = width
+    for row in range(1, final_row + 1):
+        ws.row_dimensions[row].height = 22
+    apply_border(ws)
+
+    log_ws.append(["회차", "날짜", "시간", "닉네임", "후원금액", "후원종류"])
+    for col in range(1, 7):
+        style_header(log_ws.cell(row=1, column=col))
+
+    for _, r in sorted_detail.iterrows():
+        row = log_ws.max_row + 1
+        log_ws.cell(row=row, column=1, value=r.get("회차", ""))
+        log_ws.cell(row=row, column=2, value=r.get("날짜"))
+        log_ws.cell(row=row, column=3, value=display_time(r.get("시간")))
+        log_ws.cell(row=row, column=4, value=r.get("닉네임"))
+        amount = pd.to_numeric(r.get("후원하트", 0), errors="coerce")
+        amount = 0 if pd.isna(amount) else int(max(amount, 0))
+        log_ws.cell(row=row, column=5, value=amount)
+        log_ws.cell(row=row, column=6, value=r.get("후원종류"))
+        log_ws.cell(row=row, column=5).number_format = "#,##0"
+
+    log_ws.freeze_panes = "A2"
+    for col, width in {
+        "A": 12, "B": 14, "C": 12, "D": 24, "E": 14, "F": 12,
+    }.items():
+        log_ws.column_dimensions[col].width = width
+    apply_border(log_ws)
+
+    return _save_workbook_with_cached_values(wb, cached_values)
+
+
 def safe_filename(name: str) -> str:
     return re.sub(r'[\\/:*?"<>|]+', "_", str(name)).strip() or "download"
 
@@ -954,10 +1211,14 @@ standard_settlement_files = []
 
 # 여러 파일 업로드일 때만 총합산 제공(요구사항)
 if len(uploaded_files) > 1:
-    total_file = make_total_excel(merged)
-    if total_file is None:
-        st.warning("총합산 생성 실패: 필수 컬럼(후원시간/후원아이디/후원하트/참여BJ)을 찾지 못했습니다.")
-    else:
+    try:
+        total_file = make_total_excel(merged)
+        if total_file is None:
+            st.warning("총합산 생성 실패: 후원시간 정보를 찾지 못했습니다.")
+    except Exception as e:
+        total_file = None
+        st.warning(f"총합산 생성 중 오류: {e}")
+    if total_file is not None:
         st.download_button(
             label="총합산.xlsx 다운로드",
             data=total_file,
@@ -992,7 +1253,8 @@ for bj, views in result.items():
         make_excel(
             views["정산용"],
             bj,
-            views.get("전체로그")
+            views.get("전체로그"),
+            include_type=True
         )
     ))
 
