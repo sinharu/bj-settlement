@@ -1,3 +1,4 @@
+import json
 import re
 import zipfile
 from datetime import datetime, timedelta, timezone
@@ -11,6 +12,7 @@ from openpyxl.styles import Border, Side, Alignment, Font, PatternFill
 
 from processor import FORMAT_KRW, detect_format, process_dataframe, to_standard
 from heart_text import make_heart_excel, parse_heart_text, sheet_rows, total_mismatch
+from bj_rates import SETTLE_COL, SUPPORT_COL, build_rate_table, rates_by_bj
 
 
 BUSINESS_DAY_CUTOFF_HOUR = 14
@@ -273,6 +275,11 @@ data_format = formats.pop()
 IS_KRW = data_format == FORMAT_KRW
 AMOUNT_LABEL = "후원금액" if IS_KRW else "후원하트"
 
+if IS_KRW:
+    st.info("💰 **원화 후원 파일**로 인식했습니다. 후원내역과 정산 모두 원화 금액 그대로 계산합니다.")
+else:
+    st.info("💗 **팬더티비 하트 파일**로 인식했습니다. 후원내역은 하트 개수로, 정산은 하트 1개 = 100원으로 계산합니다.")
+
 dfs = []
 if len(file_entries) > 1:
     date_to_round = build_date_to_round([d for _, _, d, _ in file_entries])
@@ -331,11 +338,12 @@ else:
 with st.expander("정산 비율 설정 (%)", expanded=True):
     if IS_KRW:
         st.caption(
-            "원화 후원 파일: 투네이션·펀네이션은 수수료를 빼고, 계좌후원은 금액에 포함된 부가세를 뺀 금액이 "
-            "정산 기준액이 됩니다. 정산금 = 정산 기준액 × 정산비율, 협력지원금 = 정산 기준액 × 협력지원율"
+            "원화 후원 파일: 투네이션·펀네이션은 부가세 별도 금액이라 수수료만 빼고, 계좌후원은 금액에 포함된 "
+            "부가세를 뺀 금액이 정산 기준액이 됩니다. 정산금 = 정산 기준액 × 정산비율, 협력지원금 = 정산 기준액 × 협력지원율"
         )
     else:
         st.caption("팬더티비 하트 파일: 정산금 = 하트 × 100원 × 정산비율, 협력지원금 = 일반하트 × 100원 × 협력지원율")
+    st.caption("아래 정산비율·협력지원율은 모든 BJ의 기본값입니다. BJ마다 다르면 다운로드 위 'BJ별 정산 조건' 표에서 바꾸세요.")
     rate_cols = st.columns(2)
     with rate_cols[0]:
         settle_pct = st.number_input("정산비율 (%)", min_value=0.0, max_value=100.0, value=45.0, step=0.5, key="rate_settle")
@@ -484,6 +492,17 @@ def make_excel(df: pd.DataFrame, bj_name: str, detail_df=None, include_type: boo
             cell = ws.cell(row=row, column=3, value=heart)
         cell.number_format = "#,##0"
 
+    # 원화 후원: 후원종류별 합계 (적힌 금액 그대로, 부가세는 정산시트에서만 구분)
+    if IS_KRW and detail_df is not None and not detail_df.empty:
+        type_sums = pd.to_numeric(detail_df["후원하트"], errors="coerce").fillna(0).groupby(detail_df["후원종류"]).sum()
+        ws["D2"] = "후원종류"
+        ws["E2"] = "후원금액"
+        for cell in (ws["D2"], ws["E2"]):
+            cell.alignment = Alignment(horizontal="center")
+        for row, type_name in enumerate(krw_type_columns(detail_df), start=3):
+            ws.cell(row=row, column=4, value=type_name)
+            ws.cell(row=row, column=5, value=int(type_sums.get(type_name, 0))).number_format = "#,##0"
+
     # 기본 폭(너무 좁아지는 것 방지) + 자동 보정
     if IS_KRW:
         ws.column_dimensions["A"].width = 26
@@ -503,10 +522,8 @@ def make_excel(df: pd.DataFrame, bj_name: str, detail_df=None, include_type: boo
         detail_ws = wb.create_sheet("상세내역")
 
         if IS_KRW:
-            # (헤더, 표준 열) 목록. 후원종류는 정산용에만 넣고 BJ용에는 넣지 않는다.
-            columns = [("날짜", "날짜"), ("시간", "시간"), ("닉네임", "닉네임"), ("후원금액", "후원하트")]
-            if include_type:
-                columns.append(("후원종류", "후원종류"))
+            # (헤더, 표준 열) 목록. 후원종류는 정산용·BJ용 모두 넣는다 (금액은 적힌 그대로).
+            columns = [("날짜", "날짜"), ("시간", "시간"), ("닉네임", "닉네임"), ("후원금액", "후원하트"), ("후원종류", "후원종류")]
         else:
             columns = [
                 ("날짜", "날짜"), ("시간", "시간"), ("아이디", "아이디"),
@@ -745,13 +762,15 @@ def _assign_rounds(detail_df: pd.DataFrame, all_round_labels: list[str] | None):
 def make_standard_settlement_excel(
     detail_df: pd.DataFrame,
     bj_name: str,
-    all_round_labels: list[str] | None = None
+    all_round_labels: list[str] | None = None,
+    rates: dict | None = None
 ) -> BytesIO:
+    rates = rates or RATES
     if IS_KRW:
-        return make_krw_settlement_excel(detail_df, bj_name, all_round_labels)
+        return make_krw_settlement_excel(detail_df, bj_name, all_round_labels, rates)
 
-    settle_rate = RATES["정산비율"]
-    support_rate = RATES["협력지원율"]
+    settle_rate = rates["정산비율"]
+    support_rate = rates["협력지원율"]
 
     wb = Workbook()
     ws = wb.active
@@ -991,11 +1010,13 @@ def pct_format(rate: float) -> str:
 def make_krw_settlement_excel(
     detail_df: pd.DataFrame,
     bj_name: str,
-    all_round_labels: list[str] | None = None
+    all_round_labels: list[str] | None = None,
+    rates: dict | None = None
 ) -> BytesIO:
     """원화 후원용 정산시트.
     정산 기준액 = 투네이션×(1-수수료) + 펀네이션×(1-수수료) + 계좌후원÷(1+부가세) + 기타
     정산금 = 기준액 × 정산비율, 협력지원금 = 기준액 × 협력지원율 (비율은 J3~J7 입력칸에서 변경)"""
+    rates = rates or RATES
     wb = Workbook()
     ws = wb.active
     ws.title = "정산시트"
@@ -1033,11 +1054,11 @@ def make_krw_settlement_excel(
 
     # 비율 입력칸 (엑셀에서 바꾸면 전체가 다시 계산된다)
     inputs = [
-        ("I3", "정산비율", "J3", RATES["정산비율"]),
-        ("I4", "협력지원율", "J4", RATES["협력지원율"]),
-        ("I5", "투네이션 수수료", "J5", RATES["투네이션수수료"]),
-        ("I6", "펀네이션 수수료", "J6", RATES["펀네이션수수료"]),
-        ("I7", "계좌후원 부가세", "J7", RATES["계좌후원부가세"]),
+        ("I3", "정산비율", "J3", rates["정산비율"]),
+        ("I4", "협력지원율", "J4", rates["협력지원율"]),
+        ("I5", "투네이션 수수료", "J5", rates["투네이션수수료"]),
+        ("I6", "펀네이션 수수료", "J6", rates["펀네이션수수료"]),
+        ("I7", "계좌후원 부가세", "J7", rates["계좌후원부가세"]),
     ]
     for label_ref, label, value_ref, value in inputs:
         ws[label_ref] = label
@@ -1047,13 +1068,15 @@ def make_krw_settlement_excel(
         ws[value_ref].number_format = pct_format(value)
     ws["I8"] = "※ 계좌후원은 부가세 포함 금액이라 ÷(1+부가세)로 제외"
     ws["I8"].font = Font(name="맑은 고딕", size=9, color="666666")
+    ws["I9"] = "※ 투네이션·펀네이션은 부가세 별도 금액이라 수수료만 제외"
+    ws["I9"].font = Font(name="맑은 고딕", size=9, color="666666")
 
-    settle_rate = RATES["정산비율"]
-    support_rate = RATES["협력지원율"]
+    settle_rate = rates["정산비율"]
+    support_rate = rates["협력지원율"]
     deduct = {
-        "투네이션": lambda x: x * (1 - RATES["투네이션수수료"]),
-        "펀네이션": lambda x: x * (1 - RATES["펀네이션수수료"]),
-        "계좌후원": lambda x: x / (1 + RATES["계좌후원부가세"]),
+        "투네이션": lambda x: x * (1 - rates["투네이션수수료"]),
+        "펀네이션": lambda x: x * (1 - rates["펀네이션수수료"]),
+        "계좌후원": lambda x: x / (1 + rates["계좌후원부가세"]),
     }
 
     def base_amount(amount_by_type: dict) -> float:
@@ -1280,6 +1303,27 @@ def make_downloads_zip(files: list[tuple[str, BytesIO]]) -> BytesIO:
 
 
 # ==================================================
+# 🧾 BJ별 정산 조건 (정산비율·협력지원율은 BJ마다 다를 수 있음)
+# ==================================================
+st.subheader("BJ별 정산 조건")
+st.caption("BJ마다 정산비율·협력지원율을 입력하세요. 처음에는 위 기본값이 채워져 있고, 표준정산시트에 BJ별로 반영됩니다.")
+bj_names = list(result.keys())
+rate_table = st.data_editor(
+    build_rate_table(bj_names, settle_pct, support_pct),
+    key="bj_rates_" + json.dumps([str(bj) for bj in bj_names], ensure_ascii=False),
+    hide_index=True,
+    width="stretch",
+    num_rows="fixed",
+    disabled=["BJ"],
+    column_config={
+        SETTLE_COL: st.column_config.NumberColumn(SETTLE_COL, min_value=0.0, max_value=100.0, step=0.5, format="%.1f"),
+        SUPPORT_COL: st.column_config.NumberColumn(SUPPORT_COL, min_value=0.0, max_value=100.0, step=0.5, format="%.1f"),
+    },
+)
+BJ_RATES = rates_by_bj(rate_table, RATES)
+
+
+# ==================================================
 # 📥 다운로드 UI
 # ==================================================
 st.success("집계 완료")
@@ -1342,7 +1386,8 @@ for bj, views in result.items():
         make_standard_settlement_excel(
             views.get("전체로그"),
             bj,
-            round_labels if len(uploaded_files) > 1 else None
+            round_labels if len(uploaded_files) > 1 else None,
+            BJ_RATES.get(str(bj))
         )
     ))
 
