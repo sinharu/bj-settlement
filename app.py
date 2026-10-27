@@ -1,5 +1,6 @@
 import re
 import zipfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from io import BytesIO
 
@@ -9,6 +10,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Border, Side, Alignment, Font, PatternFill
 
 from processor import FORMAT_KRW, detect_format, process_dataframe, to_standard
+from heart_text import make_heart_excel, parse_heart_text, sheet_rows, total_mismatch
 
 
 BUSINESS_DAY_CUTOFF_HOUR = 14
@@ -16,6 +18,7 @@ BUSINESS_DAY_CUTOFF_FRACTION = BUSINESS_DAY_CUTOFF_HOUR / 24
 MAX_STANDARD_ROUNDS = 15
 HEART_UNIT_PRICE = 100  # 하트 1개 = 100원
 KRW_DONATION_TYPES = ["투네이션", "펀네이션", "계좌후원"]
+KST = timezone(timedelta(hours=9))
 
 
 st.set_page_config(page_title="BJ 하트 집계", layout="centered")
@@ -45,6 +48,82 @@ def check_password():
 
 
 if not check_password():
+    st.stop()
+
+
+# ==================================================
+# 💗 후원하트 텍스트 정리
+# ==================================================
+HEART_TEXT_EXAMPLE = """예시)
+방송인이름   18000
+user01(닉네임A)   3000
+user02(닉네임B)   10000
+user03(닉네임C)   5000
+총합계   18000"""
+
+
+def render_heart_text_page():
+    st.title("후원하트 텍스트 정리")
+    st.caption("텍스트를 붙여넣으면 아이디 / 닉네임 / 후원하트로 나누고 하트 많은 순으로 정리합니다")
+
+    # 다른 화면에 다녀와도 붙여넣은 내용이 남도록 위젯 밖에 따로 보관
+    st.session_state["heart_text_input"] = st.session_state.get("heart_text_saved", "")
+    text = st.text_area(
+        "텍스트 붙여넣기 (한 줄에 한 명: 아이디(닉네임) 하트)",
+        height=260,
+        placeholder=HEART_TEXT_EXAMPLE,
+        key="heart_text_input",
+        on_change=lambda: st.session_state.update(heart_text_saved=st.session_state["heart_text_input"]),
+    )
+    if not text.strip():
+        st.info("텍스트를 붙여넣으면 정리 결과가 표시됩니다.")
+        return
+
+    result = parse_heart_text(text)
+    if not result.rows:
+        st.warning("후원 줄을 찾지 못했습니다. '아이디(닉네임)   하트' 형식인지 확인해 주세요.")
+        return
+
+    expected = total_mismatch(result)
+    if expected is not None:
+        st.warning(f"합계가 맞지 않습니다: 적힌 값 {expected:,} / 실제 더한 값 {result.sum:,}")
+    if result.skipped:
+        st.warning(f"읽지 못한 줄 {len(result.skipped)}개: " + " | ".join(result.skipped))
+    if expected is None and not result.skipped:
+        st.success(f"{len(result.rows)}명, 합계 {result.sum:,} 하트 확인됨")
+
+    rows = sheet_rows(result)
+    preview = pd.DataFrame(rows, columns=["A", "B", "C"]).fillna("")
+    preview["A"] = preview["A"].astype(str)
+    preview["C"] = [f"{v:,}" if isinstance(v, int) else v for v in preview["C"]]
+    st.dataframe(preview, hide_index=True, width="stretch", height=min(38 * (len(rows) + 1), 600))
+
+    today = datetime.now(KST).strftime("%m%d")
+    default_name = f"{today} {result.name}".strip()
+    file_name = st.text_input("파일 이름", value=default_name, key=f"heart_file_name_{default_name}")
+    file_name = re.sub(r'[\\/:*?"<>|]+', "_", file_name).strip() or "후원하트"
+    st.download_button(
+        "엑셀 파일로 저장",
+        data=make_heart_excel(result),
+        file_name=f"{file_name}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        type="primary",
+        width="stretch",
+    )
+
+    with st.expander("표 복사용 텍스트 (엑셀 A1칸에 붙여넣기)"):
+        st.code("\n".join("\t".join("" if v is None else str(v) for v in row) for row in rows), language=None)
+
+
+page = st.radio(
+    "기능 선택",
+    ["파일 집계", "후원하트 텍스트 정리"],
+    horizontal=True,
+    label_visibility="collapsed",
+    key="page_mode",
+)
+if page == "후원하트 텍스트 정리":
+    render_heart_text_page()
     st.stop()
 
 
