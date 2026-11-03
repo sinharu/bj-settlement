@@ -514,9 +514,17 @@ def make_excel(df: pd.DataFrame, bj_name: str, detail_df=None, include_type: boo
         ws["E2"] = "후원금액"
         for cell in (ws["D2"], ws["E2"]):
             cell.alignment = Alignment(horizontal="center")
+        type_total = 0
+        row = 2
         for row, type_name in enumerate(krw_type_columns(detail_df), start=3):
+            amount = int(type_sums.get(type_name, 0))
+            type_total += amount
             ws.cell(row=row, column=4, value=type_name)
-            ws.cell(row=row, column=5, value=int(type_sums.get(type_name, 0))).number_format = "#,##0"
+            ws.cell(row=row, column=5, value=amount).number_format = "#,##0"
+        ws.cell(row=row + 1, column=4, value="총합").font = Font(bold=True)
+        total_amount_cell = ws.cell(row=row + 1, column=5, value=type_total)
+        total_amount_cell.number_format = "#,##0"
+        total_amount_cell.font = Font(bold=True)
 
     # 기본 폭(너무 좁아지는 것 방지) + 자동 보정
     if IS_KRW:
