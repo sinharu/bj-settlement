@@ -1,4 +1,5 @@
 import unicodedata
+from decimal import Decimal, InvalidOperation
 
 import pandas as pd
 
@@ -9,6 +10,7 @@ FORMAT_KRW = "원화"
 STANDARD_COLUMNS = [
     "형식", "참여BJ", "회차", "후원시간", "날짜", "시간",
     "아이디", "닉네임", "후원하트", "구분", "후원종류",
+    "방송일", "방송회차",
 ]
 
 
@@ -65,6 +67,119 @@ def classify_heart(user_id: str) -> str:
 # ==========================================
 # 🔹 전처리 + 표준화
 # ==========================================
+def _find_ledger_header(df: pd.DataFrame) -> tuple[str, int] | None:
+    if df.columns.empty or not isinstance(df.columns[0], str):
+        return None
+    title = df.columns[0].strip()
+    suffix = " 총 후원 내역"
+    if not title.endswith(suffix):
+        return None
+    bj_name = normalize_bj_name(title[:-len(suffix)])
+    if not bj_name:
+        return None
+
+    required = {"후원 일시", "플랫폼", "후원자 닉네임", "총 후원 금액"}
+    for position, row in enumerate(df.itertuples(index=False, name=None)):
+        if required.issubset({value.strip() for value in row if isinstance(value, str)}):
+            return bj_name, position
+    return None
+
+
+def _ledger_amount(value, label: str) -> int:
+    """장부 금액은 누락/잘못된 값을 0으로 바꾸거나 소수점을 버리지 않는다."""
+    try:
+        amount = Decimal(str(value).strip())
+    except InvalidOperation:
+        amount = Decimal("NaN")
+    if (
+        not amount.is_finite()
+        or amount < 0
+        or amount != amount.to_integral_value()
+        or amount > 2**63 - 1
+    ):
+        raise ValueError(f"후원 장부 {label}: 유효한 0 이상의 원화 정수가 아닙니다 (값: {value}).")
+    return int(amount)
+
+
+def _ledger_to_krw(df: pd.DataFrame, bj_name: str, header_position: int):
+    columns = {
+        value.strip(): position
+        for position, value in enumerate(df.iloc[header_position])
+        if isinstance(value, str)
+    }
+    required = {
+        "번호", "후원 일시", "플랫폼", "후원자 닉네임",
+        "웹후원 금액", "계좌후원 금액", "총 후원 금액",
+    }
+    missing = required.difference(columns)
+    if missing:
+        raise ValueError(f"후원 장부 필수 열이 없습니다: {', '.join(sorted(missing))}")
+
+    metadata = {
+        row[0].strip(): row[1]
+        for row in df.iloc[:header_position].itertuples(index=False, name=None)
+        if isinstance(row[0], str)
+    }
+    broadcast_date = pd.to_datetime(metadata.get("방송일"), errors="coerce")
+    broadcast_date = None if pd.isna(broadcast_date) else broadcast_date.date()
+    broadcast_round = normalize_bj_name(metadata.get("방송 회차명")) or None
+    round_column = df.columns.get_loc("업로드회차") if "업로드회차" in df.columns else None
+
+    totals = {"웹후원 합계": 0, "계좌후원 합계": 0, "총 후원 합계": 0}
+    footer_totals = []
+    records = []
+    for excel_row, row in enumerate(
+        df.iloc[header_position + 1:].itertuples(index=False, name=None),
+        start=header_position + 3,
+    ):
+        label = row[0].strip() if isinstance(row[0], str) else ""
+        if label in totals:
+            footer_totals.append((label, _ledger_amount(row[1], f"엑셀 {excel_row}행 {label}")))
+            continue
+        if pd.isna(pd.to_numeric(row[columns["번호"]], errors="coerce")):
+            continue
+
+        web = _ledger_amount(row[columns["웹후원 금액"]], f"엑셀 {excel_row}행 웹후원 금액")
+        bank = _ledger_amount(row[columns["계좌후원 금액"]], f"엑셀 {excel_row}행 계좌후원 금액")
+        total = _ledger_amount(row[columns["총 후원 금액"]], f"엑셀 {excel_row}행 총 후원 금액")
+        if web + bank != total:
+            raise ValueError(
+                f"후원 장부 엑셀 {excel_row}행 금액 불일치: 웹후원 금액 {web:,}원 + "
+                f"계좌후원 금액 {bank:,}원 = {web + bank:,}원, "
+                f"총 후원 금액 {total:,}원 (차이 {abs(web + bank - total):,}원)."
+            )
+        totals["웹후원 합계"] += web
+        totals["계좌후원 합계"] += bank
+        totals["총 후원 합계"] += total
+
+        platform = normalize_bj_name(row[columns["플랫폼"]])
+        web_type = platform if platform and platform != "계좌후원" else "웹후원"
+        for amount, donation_type in [(web, web_type), (bank, "계좌후원")]:
+            if amount > 0:
+                records.append({
+                    "스트리머": bj_name,
+                    "닉네임": row[columns["후원자 닉네임"]],
+                    "종류": donation_type,
+                    "개수": amount,
+                    "시간": row[columns["후원 일시"]],
+                    "업로드회차": row[round_column] if round_column is not None else None,
+                })
+
+    for label, reported in footer_totals:
+        actual = totals[label]
+        if reported != actual:
+            raise ValueError(
+                f"후원 장부 {label} 불일치: 하단 합계 {reported:,}원, "
+                f"데이터 합계 {actual:,}원 (차이 {abs(reported - actual):,}원)."
+            )
+
+    return (
+        pd.DataFrame(records, columns=["스트리머", "닉네임", "종류", "개수", "시간", "업로드회차"]),
+        broadcast_date,
+        broadcast_round,
+    )
+
+
 def detect_format(df: pd.DataFrame) -> str | None:
     """필수 열 이름으로 하트/원화 후원 형식을 구분한다."""
     columns = [c for c in df.columns if isinstance(c, str)]
@@ -79,17 +194,25 @@ def detect_format(df: pd.DataFrame) -> str | None:
     ):
         return FORMAT_HEART
 
+    if _find_ledger_header(df) is not None:
+        return FORMAT_KRW
+
     return None
 
 
 def to_standard(df: pd.DataFrame) -> pd.DataFrame | None:
-    """후원 수량의 단위를 유지하면서 두 입력 형식을 공통 열로 변환한다."""
+    """후원 수량의 단위를 유지하면서 지원하는 입력 형식을 공통 열로 변환한다."""
     donation_format = detect_format(df)
     if donation_format is None:
         return None
 
     df = df.reset_index(drop=True).copy()
+    broadcast_date = None
+    broadcast_round = None
     if donation_format == FORMAT_KRW:
+        ledger_header = _find_ledger_header(df)
+        if ledger_header is not None:
+            df, broadcast_date, broadcast_round = _ledger_to_krw(df, *ledger_header)
         columns = {c.strip(): c for c in df.columns if isinstance(c, str)}
         if "등록" in columns:
             registered = df[columns["등록"]].fillna("").astype(str).str.strip()
@@ -127,6 +250,8 @@ def to_standard(df: pd.DataFrame) -> pd.DataFrame | None:
     standard["형식"] = donation_format
     standard["참여BJ"] = df[col_bj].map(normalize_bj_name)
     standard["회차"] = df["업로드회차"] if "업로드회차" in df.columns else None
+    standard["방송일"] = broadcast_date
+    standard["방송회차"] = broadcast_round
 
     if col_time is not None:
         standard["후원시간"] = parse_donation_times(df[col_time])
@@ -142,7 +267,11 @@ def to_standard(df: pd.DataFrame) -> pd.DataFrame | None:
 
 def clean_and_prepare(df: pd.DataFrame):
     if "형식" in df.columns:
-        return df.copy()
+        standard = df.copy()
+        for column in ["방송일", "방송회차"]:
+            if column not in standard.columns:
+                standard[column] = None
+        return standard
     return to_standard(df)
 
 

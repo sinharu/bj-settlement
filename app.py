@@ -13,6 +13,7 @@ from openpyxl.styles import Border, Side, Alignment, Font, PatternFill
 from processor import FORMAT_KRW, detect_format, process_dataframe, to_standard
 from heart_text import make_heart_excel, parse_heart_text, sheet_rows, total_mismatch
 from bj_rates import SETTLE_COL, SUPPORT_COL, build_rate_table, rates_by_bj
+from receipt_image import make_receipt_png, round_from_filename, unique_filename
 
 
 BUSINESS_DAY_CUTOFF_HOUR = 14
@@ -248,6 +249,7 @@ def build_date_to_round(business_dates):
 
 # 파일마다 형식(팬더티비 하트 / 원화 후원)을 감지해 표준 프레임으로 바꾼다.
 file_entries = []
+ledger_dates = []
 for idx, f in enumerate(uploaded_files, start=1):
     try:
         if f.name.lower().endswith(".csv"):
@@ -257,9 +259,20 @@ for idx, f in enumerate(uploaded_files, start=1):
         file_format = detect_format(raw)
         std_df = to_standard(raw) if file_format else None
         if std_df is None:
-            st.error(f"{f.name}: 지원하지 않는 파일 형식입니다. (팬더티비 하트 내역 또는 원화 후원 리스트만 가능)")
+            st.error(f"{f.name}: 지원하지 않는 파일 형식입니다. (팬더티비 하트 내역, 원화 후원 리스트, 후원 장부만 가능)")
             continue
-        file_entries.append((idx, std_df, file_business_date(std_df, f.name), file_format))
+        broadcast_dates = std_df["방송일"].dropna()
+        if not broadcast_dates.empty:
+            # 후원 장부는 파일에 적힌 방송일이 기준이다. (방송이 다음 날까지 이어져도 같은 방송)
+            business_date = broadcast_dates.mode().iloc[0]
+            ledger_dates.append(business_date)
+        else:
+            business_date = file_business_date(std_df, f.name)
+            if file_format == FORMAT_KRW:
+                std_df["방송일"] = business_date
+                if std_df["방송회차"].isna().all():
+                    std_df["방송회차"] = round_from_filename(f.name)
+        file_entries.append((idx, std_df, business_date, file_format))
     except Exception as e:
         st.error(f"{f.name} 읽기 실패: {e}")
 
@@ -324,7 +337,9 @@ def extract_earliest_date_prefix(df):
         return None
     return min_dt.strftime("%m.%d")
 
-if len(uploaded_files) == 1:
+if len(uploaded_files) == 1 and ledger_dates:
+    prefix = ledger_dates[0].strftime("%m.%d")
+elif len(uploaded_files) == 1:
     prefix = extract_prefix_from_filename(uploaded_files)
     if not prefix:
         prefix = extract_earliest_date_prefix(merged)
@@ -1324,6 +1339,26 @@ BJ_RATES = rates_by_bj(rate_table, RATES)
 
 
 # ==================================================
+# 🖼️ BJ 전달용 내역 이미지 (원화 후원 파일)
+# ==================================================
+receipt_files = []
+if IS_KRW:
+    st.subheader("BJ 전달용 이미지")
+    receipt_title = st.text_input("이미지 상단 제목", value="비너스 레이블", key="receipt_title").strip()
+    used_receipt_names = set()
+    try:
+        for bj, views in result.items():
+            receipt_name = f"{safe_filename(bj)}_내역이미지.png"
+            if prefix:
+                receipt_name = f"{prefix}_{receipt_name}"
+            receipt_name = unique_filename(receipt_name, used_receipt_names)
+            receipt_files.append((bj, receipt_name, make_receipt_png(receipt_title, bj, views["전체로그"])))
+    except Exception as e:
+        receipt_files = []
+        st.warning(f"이미지를 만들지 못했습니다: {e} (엑셀 파일은 그대로 받을 수 있습니다)")
+
+
+# ==================================================
 # 📥 다운로드 UI
 # ==================================================
 st.success("집계 완료")
@@ -1400,6 +1435,16 @@ for bj, views in result.items():
         )
     ))
 
+if receipt_files:
+    zip_name = f"{prefix}_내역이미지_전체다운로드.zip" if prefix else "내역이미지_전체다운로드.zip"
+    st.download_button(
+        label="내역 이미지 전체 ZIP 다운로드",
+        data=make_downloads_zip([(name, BytesIO(png)) for _, name, png in receipt_files]),
+        file_name=zip_name,
+        mime="application/zip",
+        key="download_receipt_zip"
+    )
+
 if settlement_files:
     zip_name = f"{prefix}_정산용_전체다운로드.zip" if prefix else "정산용_전체다운로드.zip"
     st.download_button(
@@ -1434,6 +1479,17 @@ if standard_settlement_files:
 for bj_index, (bj, views) in enumerate(result.items(), start=1):
 
     st.subheader(bj)
+
+    receipt = next(((name, png) for receipt_bj, name, png in receipt_files if receipt_bj == bj), None)
+    if receipt:
+        st.image(receipt[1], width=300)
+        st.download_button(
+            label=f"{receipt[0]} 다운로드",
+            data=receipt[1],
+            file_name=receipt[0],
+            mime="image/png",
+            key=f"download_receipt_{bj_index}"
+        )
 
     filename1 = (
         f"{prefix}_{safe_filename(bj)}_정산용.xlsx"
