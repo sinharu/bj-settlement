@@ -1,3 +1,4 @@
+import re
 import unicodedata
 from decimal import Decimal, InvalidOperation
 
@@ -67,6 +68,62 @@ def classify_heart(user_id: str) -> str:
 # ==========================================
 # 🔹 전처리 + 표준화
 # ==========================================
+def _calendar_timestamp(year, month, day, hour=0):
+    """달력에 없는 조합(26월 11일 등)이면 None을 돌려준다."""
+    try:
+        return pd.Timestamp(year=year, month=month, day=day, hour=hour)
+    except ValueError:
+        return None
+
+
+def written_date_from_filename(stem, this_year=None):
+    """파일명에 적힌 날짜를 찾는다. 연월일과 월일 모두 '.' 또는 '-'로 구분할 수 있다."""
+    this_year = this_year or pd.Timestamp.today().year
+
+    for match in re.finditer(r"(?<!\d)(20\d{2}|\d{2})([.\-])(\d{1,2})\2(\d{1,2})(?!\d)", stem):
+        year_text, _, month, day = match.groups()
+        year = int(year_text) if len(year_text) == 4 else 2000 + int(year_text)
+        # 두 자리 연도는 올해 근처만 인정한다. (10-08-7화, 11.03.26을 옛날 날짜로 읽지 않게)
+        if len(year_text) == 2 and abs(year - this_year) > 1:
+            continue
+        written = _calendar_timestamp(year, int(month), int(day))
+        if written is not None:
+            return written.date()
+
+    # '.'/'-' 구분을 먼저 본다. (시즌2 11.03을 2월 11일로 읽지 않게)
+    for pattern in (
+        r"(?<!\d)(\d{1,2})[.\-](\d{1,2})(?!\d)",
+        r"(?<!\d)(\d{1,2})[.\-_월 ]+(\d{1,2})(?:일)?(?!\d)",
+    ):
+        for match in re.finditer(pattern, stem):
+            month, day = map(int, match.groups())
+            written = _calendar_timestamp(this_year, month, day)
+            if written is not None:
+                return written.date()
+
+    return None
+
+
+def export_time_from_filename(stem):
+    """파일명 끝의 내보낸 시각(202611040505)을 찾는다."""
+    match = re.search(r"(20\d{2})(\d{2})(\d{2})(\d{2})?", stem)
+    if not match:
+        return None
+    year, month, day, hour = match.groups()
+    return _calendar_timestamp(int(year), int(month), int(day), int(hour or 0))
+
+
+def broadcast_start_date(times, business_dates):
+    """방송이 이틀에 걸쳐도 시작한 날짜를 돌려준다.
+
+    첫 후원 날짜가 정산일로도 잡히면 그날 시작한 방송이다. 아니면 첫 후원이 자정을 넘긴
+    뒤라는 뜻이므로 가장 빠른 정산일을 쓴다.
+    """
+    first_day = times.min().date()
+    dates = set(business_dates)
+    return first_day if first_day in dates else min(dates)
+
+
 def _find_ledger_header(df: pd.DataFrame) -> tuple[str, int] | None:
     if df.columns.empty or not isinstance(df.columns[0], str):
         return None

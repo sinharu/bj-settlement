@@ -10,10 +10,13 @@ from pandas.testing import assert_frame_equal
 from processor import (
     FORMAT_HEART,
     FORMAT_KRW,
+    broadcast_start_date,
     clean_and_prepare,
     detect_format,
+    export_time_from_filename,
     process_dataframe,
     to_standard,
+    written_date_from_filename,
 )
 
 
@@ -529,3 +532,55 @@ def test_legacy_standard_frame_without_broadcast_metadata_is_still_supported(req
     before = legacy.copy(deep=True)
     assert_results_equal(process_dataframe(raw), process_dataframe(legacy))
     assert_frame_equal(legacy, before)
+
+
+@pytest.mark.parametrize(
+    ("stem", "expected"),
+    [
+        ("비너스 1회차 26.11.03_202611040505", date(2026, 11, 3)),
+        ("26.11.03 비너스", date(2026, 11, 3)),
+        ("26-11-03 비너스", date(2026, 11, 3)),
+        ("2026.11.03 비너스", date(2026, 11, 3)),
+        ("비너스 1회차 2026-11-03_202611040505", date(2026, 11, 3)),
+        ("11.03 비너스", date(2026, 11, 3)),
+        ("11-03 비너스", date(2026, 11, 3)),
+        ("비너스 1회차 11.3", date(2026, 11, 3)),
+        ("11월 3일 내역", date(2026, 11, 3)),
+        ("시즌2 11.03 내역", date(2026, 11, 3)),
+        ("10-16 위너컴퍼니 시즌2 월수금 11화_202610200114", date(2026, 10, 16)),
+        ("10-08 7화_202610090235", date(2026, 10, 8)),
+        ("10-08-7화", date(2026, 10, 8)),
+        ("11.10 후니_내역", date(2026, 11, 10)),
+        ("11.03.26 내역", date(2026, 11, 3)),
+        ("26.13.45 11.03 내역", date(2026, 11, 3)),
+        ("99.99 내역_202611040505", None),
+        ("시즌2 내역", None),
+    ],
+)
+def test_written_date_from_filename(stem, expected):
+    assert written_date_from_filename(stem, this_year=2026) == expected
+
+
+def test_export_time_from_filename():
+    assert export_time_from_filename("비너스_202611040505") == pd.Timestamp(2026, 11, 4, 5)
+    assert export_time_from_filename("비너스_20261399") is None
+    assert export_time_from_filename("비너스") is None
+
+
+@pytest.mark.parametrize(
+    ("times", "expected"),
+    [
+        # 저녁에 시작해 다음 날 새벽에 끝난 방송
+        (["2026-11-03 18:00", "2026-11-04 05:00"], date(2026, 11, 3)),
+        # 후원이 자정 이후에만 있는 경우
+        (["2026-11-04 00:30", "2026-11-04 05:00"], date(2026, 11, 3)),
+        # 14시 전에 시작해도 전날로 밀리지 않는다
+        (["2026-11-03 13:58", "2026-11-03 15:00", "2026-11-04 01:00"], date(2026, 11, 3)),
+        # 다음 날 14시를 넘기고 후원이 더 많아도 시작한 날짜다
+        (["2026-11-03 15:00", "2026-11-04 15:00", "2026-11-04 16:00", "2026-11-04 17:00"], date(2026, 11, 3)),
+    ],
+)
+def test_broadcast_start_date(times, expected):
+    series = pd.Series(pd.to_datetime(times))
+    business = series.apply(lambda t: (t - pd.Timedelta(days=1) if t.hour < 14 else t).date())
+    assert broadcast_start_date(series, business) == expected

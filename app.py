@@ -10,7 +10,15 @@ import pandas as pd
 from openpyxl import Workbook
 from openpyxl.styles import Border, Side, Alignment, Font, PatternFill
 
-from processor import FORMAT_KRW, detect_format, process_dataframe, to_standard
+from processor import (
+    FORMAT_KRW,
+    broadcast_start_date,
+    detect_format,
+    export_time_from_filename,
+    process_dataframe,
+    to_standard,
+    written_date_from_filename,
+)
 from heart_text import make_heart_excel, parse_heart_text, sheet_rows, total_mismatch
 from bj_rates import SETTLE_COL, SUPPORT_COL, build_rate_table, rates_by_bj
 from receipt_image import make_receipt_png, round_from_filename, unique_filename
@@ -198,16 +206,13 @@ def donation_business_date(dt):
 def business_date_from_filename(filename):
     stem = Path(filename).stem
 
-    md = re.search(r"(?<!\d)(\d{1,2})[.\-_월 ]+(\d{1,2})(?:일)?(?!\d)", stem)
-    if md:
-        month, day = map(int, md.groups())
-        return pd.Timestamp(year=pd.Timestamp.today().year, month=month, day=day).date()
+    written_date = written_date_from_filename(stem)
+    if written_date:
+        return written_date
 
-    ymd = re.search(r"(20\d{2})(\d{2})(\d{2})(\d{2})?", stem)
-    if ymd:
-        year, month, day, hour = ymd.groups()
-        dt = pd.Timestamp(year=int(year), month=int(month), day=int(day), hour=int(hour or 0))
-        return donation_business_date(dt)
+    export_time = export_time_from_filename(stem)
+    if export_time is not None:
+        return donation_business_date(export_time)
 
     return None
 
@@ -230,6 +235,13 @@ def file_business_date(std_df, filename):
     if filename_date in candidates:
         return filename_date
     return candidates[0]
+
+
+def krw_broadcast_date(std_df, filename):
+    times = std_df["후원시간"].dropna()
+    if times.empty:
+        return business_date_from_filename(filename)
+    return broadcast_start_date(times, times.apply(donation_business_date))
 
 
 def build_date_to_round(business_dates):
@@ -267,11 +279,13 @@ for idx, f in enumerate(uploaded_files, start=1):
             business_date = broadcast_dates.mode().iloc[0]
             ledger_dates.append(business_date)
         else:
-            business_date = file_business_date(std_df, f.name)
             if file_format == FORMAT_KRW:
+                business_date = krw_broadcast_date(std_df, f.name)
                 std_df["방송일"] = business_date
                 if std_df["방송회차"].isna().all():
                     std_df["방송회차"] = round_from_filename(f.name)
+            else:
+                business_date = file_business_date(std_df, f.name)
         file_entries.append((idx, std_df, business_date, file_format))
     except Exception as e:
         st.error(f"{f.name} 읽기 실패: {e}")
@@ -326,7 +340,7 @@ if IS_KRW:
 def extract_prefix_from_filename(files):
     for f in files:
         stem = Path(f.name).stem
-        m = re.match(r"^(\d{2}\.\d{2})", stem)
+        m = re.match(r"^(\d{2}\.\d{2})(?![.\d])", stem)
         if m:
             return m.group(1)
     return None
@@ -341,6 +355,8 @@ if len(uploaded_files) == 1 and ledger_dates:
     prefix = ledger_dates[0].strftime("%m.%d")
 elif len(uploaded_files) == 1:
     prefix = extract_prefix_from_filename(uploaded_files)
+    if not prefix and file_entries[0][3] == FORMAT_KRW and file_entries[0][2]:
+        prefix = file_entries[0][2].strftime("%m.%d")
     if not prefix:
         prefix = extract_earliest_date_prefix(merged)
 else:
